@@ -60,7 +60,19 @@ static class Logger
 {
     private static readonly object _lock = new();
     private static StreamWriter? _writer;
-    private static string _path = Path.Combine(AppContext.BaseDirectory, "ChatMouse.log");
+    private static string GetBaseDirectory()
+    {
+        // 실행 파일이 있는 디렉터리를 기준으로 사용
+        if (!string.IsNullOrEmpty(Environment.ProcessPath))
+        {
+            string? dir = Path.GetDirectoryName(Environment.ProcessPath);
+            if (!string.IsNullOrEmpty(dir))
+                return dir;
+        }
+        // 폴백: AppContext.BaseDirectory 사용
+        return AppContext.BaseDirectory;
+    }
+    private static string _path = Path.Combine(GetBaseDirectory(), "ChatMouse.log");
 
     public static void Init()
     {
@@ -68,7 +80,8 @@ static class Logger
         {
             lock (_lock)
             {
-                Directory.CreateDirectory(AppContext.BaseDirectory);
+                string baseDir = GetBaseDirectory();
+                Directory.CreateDirectory(baseDir);
                 _writer = new StreamWriter(new FileStream(_path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite), new UTF8Encoding(false)) { AutoFlush = true };
                 Info("===== App Start =====");
                 Info($".NET: {Environment.Version}, OS: {Environment.OSVersion}");
@@ -263,7 +276,20 @@ public static class App
     private const string IpcWindowTitle = "ChatMouse_IPC_v1";
     private const int WM_COPYDATA = 0x004A;
 
-    private static readonly string ConfigPath = Path.Combine(AppContext.BaseDirectory, "config.json");
+    private static string GetBaseDirectory()
+    {
+        // 실행 파일이 있는 디렉터리를 기준으로 사용
+        if (!string.IsNullOrEmpty(Environment.ProcessPath))
+        {
+            string? dir = Path.GetDirectoryName(Environment.ProcessPath);
+            if (!string.IsNullOrEmpty(dir))
+                return dir;
+        }
+        // 폴백: AppContext.BaseDirectory 사용
+        return AppContext.BaseDirectory;
+    }
+
+    private static readonly string ConfigPath = Path.Combine(GetBaseDirectory(), "config.json");
 
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
@@ -445,7 +471,7 @@ public static class App
 
             try
             {
-                var icoPath = Path.Combine(AppContext.BaseDirectory, "icon.ico");
+                var icoPath = Path.Combine(GetBaseDirectory(), "icon.ico");
                 if (File.Exists(icoPath)) { _tray.Icon = new Icon(icoPath); Logger.Info("Custom tray icon loaded"); }
             }
             catch (Exception ex) { Logger.Warn("Tray icon load failed: " + ex.Message); }
