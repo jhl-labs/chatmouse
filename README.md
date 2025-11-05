@@ -119,3 +119,7 @@ dotnet publish ChatMouse.csproj -c Release -r win-x64 `
 프로젝트 라이센스를 명시해주세요.
 
 
+### 릴리즈
+- config 파일을 settings에서 직접 수정 가능
+- config 파일의 저장 위치가 ~/.config/chatmouse/config.json으로 변경
+- 클릭 시 Tooltip에서 Text로 전환하여 창이 영구 유지되며 복사 & 붙여넣기가 가능

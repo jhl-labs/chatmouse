@@ -106,11 +106,12 @@ static class Logger
 
 #endregion
 
-#region Tooltip Form (auto-close tuned + close button in Text mode)
+#region Tooltip Form (auto-close tuned + close button in Text mode + newline normalize)
 
 public class PrettyTooltipForm : Form
 {
-    private string _text;
+    private string _textRaw;
+    private string _text; // 항상 CRLF로 정규화된 텍스트
     private readonly Timer _animTimer = new() { Interval = 16 };
     private readonly Timer _cursorWatch = new() { Interval = 30 };
     private readonly TextBox _textBox;
@@ -140,7 +141,9 @@ public class PrettyTooltipForm : Form
 
     public PrettyTooltipForm(string initialText)
     {
-        _text = initialText ?? "";
+        _textRaw = initialText ?? "";
+        _text = NormalizeNewlines(_textRaw);
+
         FormBorderStyle = FormBorderStyle.None;
         StartPosition = FormStartPosition.Manual;
         TopMost = true;
@@ -165,8 +168,9 @@ public class PrettyTooltipForm : Form
             BorderStyle = BorderStyle.None,
             Multiline = true,
             ReadOnly = true,
-            ScrollBars = ScrollBars.None,
             WordWrap = true,
+            AcceptsReturn = true,
+            ScrollBars = ScrollBars.None,
             Dock = DockStyle.None,
             TabStop = false,
             Visible = false,
@@ -175,11 +179,10 @@ public class PrettyTooltipForm : Form
         Controls.Add(_textBox);
         Controls.SetChildIndex(_textBox, Controls.Count - 1);
 
-        // ✅ 닫기 버튼 (텍스트 모드에서만 보이게)
+        // 닫기 버튼 (텍스트 모드에서만)
         _btnClose = new Button
         {
             Text = "×",
-            // ⬇⬇⬇ 여기만 수정: nine: 제거하고 9f 로!
             Font = new Font("Segoe UI", 9f, FontStyle.Bold),
             ForeColor = Color.White,
             BackColor = Color.FromArgb(48, 48, 48),
@@ -311,7 +314,8 @@ public class PrettyTooltipForm : Form
 
     public void SetText(string t)
     {
-        _text = t ?? "";
+        _textRaw = t ?? "";
+        _text = NormalizeNewlines(_textRaw);
         _textBox.Text = _text;
         RecalcSizeAndPlaceNearCursor(_anchorCursor);
         Invalidate();
@@ -324,7 +328,7 @@ public class PrettyTooltipForm : Form
         _useTextBox = true;
         _cursorWatch.Stop();
 
-        _textBox.Text = _text;
+        _textBox.Text = _text; // 이미 정규화된 텍스트 사용
         _textBox.Enabled = true;
         _textBox.Visible = true;
         Controls.SetChildIndex(_textBox, 0);
@@ -447,10 +451,18 @@ public class PrettyTooltipForm : Form
         gp.CloseFigure();
         return gp;
     }
+
+    // 🔑 핵심: 줄바꿈을 항상 CRLF로 맞춘다.
+    private static string NormalizeNewlines(string s)
+    {
+        if (string.IsNullOrEmpty(s)) return string.Empty;
+        // 1) \r\n -> \n 로 통일, 2) \r 단독도 \n 으로, 3) 최종적으로 \n -> \r\n
+        var t = s.Replace("\r\n", "\n").Replace("\r", "\n").Replace("\n", "\r\n");
+        return t;
+    }
 }
 
 #endregion
-
 
 #region Config
 
@@ -486,18 +498,19 @@ public static class App
     private static FileSystemWatcher? _cfgWatcher;
     private static System.Threading.Timer? _cfgDebounce;
 
-    private static string GetBaseDirectory()
+    // ~/.chatmouse/config.json
+    private static string GetConfigDirectory()
     {
-        if (!string.IsNullOrEmpty(Environment.ProcessPath))
-        {
-            string? dir = Path.GetDirectoryName(Environment.ProcessPath);
-            if (!string.IsNullOrEmpty(dir))
-                return dir;
-        }
-        return AppContext.BaseDirectory;
+        string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        if (string.IsNullOrWhiteSpace(home))
+            home = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+
+        string dir = Path.Combine(home, ".chatmouse");
+        try { Directory.CreateDirectory(dir); } catch { }
+        return dir;
     }
 
-    private static readonly string ConfigPath = Path.Combine(GetBaseDirectory(), "config.json");
+    private static readonly string ConfigPath = Path.Combine(GetConfigDirectory(), "config.json");
 
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
@@ -941,6 +954,8 @@ public static class App
 
     private static AppConfig LoadConfig()
     {
+        try { Directory.CreateDirectory(Path.GetDirectoryName(ConfigPath)!); } catch { }
+
         if (!File.Exists(ConfigPath))
         {
             var sample = new AppConfig
@@ -958,7 +973,7 @@ public static class App
             };
             string json = JsonSerializer.Serialize(sample, JsonOpts);
             File.WriteAllText(ConfigPath, json, new UTF8Encoding(false));
-            Logger.Info("config.json created with defaults");
+            Logger.Info("config.json created with defaults at " + ConfigPath);
             return sample;
         }
 
@@ -976,7 +991,10 @@ public static class App
         if (!raw.Contains("\"tray_mode\"")) { cfg.tray_mode = true; changed = true; }
 
         if (changed)
-            File.WriteAllText(ConfigPath, JsonSerializer.Serialize(cfg, JsonOpts), new UTF8Encoding(false));
+        {
+            try { File.WriteAllText(ConfigPath, JsonSerializer.Serialize(cfg, JsonOpts), new UTF8Encoding(false)); }
+            catch (Exception ex) { Logger.Warn("Failed to persist defaulted config: " + ex.Message); }
+        }
 
         return cfg;
     }
@@ -987,6 +1005,7 @@ public static class App
         {
             string dir = Path.GetDirectoryName(ConfigPath)!;
             string file = Path.GetFileName(ConfigPath);
+            Directory.CreateDirectory(dir);
             _cfgWatcher = new FileSystemWatcher(dir, file)
             {
                 NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.CreationTime | NotifyFilters.Attributes | NotifyFilters.FileName,
@@ -1000,7 +1019,7 @@ public static class App
             _cfgWatcher.Created += onChange;
             _cfgWatcher.Renamed += onRename;
             _cfgWatcher.Deleted += onChange;
-            Logger.Info("Config watcher started");
+            Logger.Info("Config watcher started at " + dir);
         }
         catch (Exception ex) { Logger.Warn("Config watcher start failed: " + ex.Message); }
     }
@@ -1045,6 +1064,7 @@ public static class App
         {
             try
             {
+                Directory.CreateDirectory(Path.GetDirectoryName(ConfigPath)!);
                 File.WriteAllText(ConfigPath, JsonSerializer.Serialize(cfg, JsonOpts), new UTF8Encoding(false));
                 _cfgCurrent = cfg;
 
@@ -1056,7 +1076,7 @@ public static class App
                 }
                 catch (Exception ex) { Logger.Warn("HttpClient recreate failed after SaveConfig: " + ex.Message); }
 
-                Logger.Info("SaveConfig: config.json updated by user settings.");
+                Logger.Info("SaveConfig: config.json updated by user settings (" + ConfigPath + ").");
                 try { ConfigChanged?.Invoke(cfg); } catch { }
             }
             catch (Exception ex)
