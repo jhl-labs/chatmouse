@@ -11,11 +11,38 @@ Write-Host "ChatMouse Standalone Build" -ForegroundColor Cyan
 Write-Host "=====================================" -ForegroundColor Cyan
 Write-Host ""
 
+# Kill running ChatMouse processes
+Write-Host "Checking for running ChatMouse processes..." -ForegroundColor Yellow
+$processes = Get-Process -Name "ChatMouse" -ErrorAction SilentlyContinue
+if ($processes) {
+    Write-Host "Terminating running ChatMouse.exe processes..." -ForegroundColor Yellow
+    $processes | Stop-Process -Force
+    Start-Sleep -Seconds 2
+} else {
+    Write-Host "No running ChatMouse.exe found." -ForegroundColor Gray
+}
+Write-Host ""
+
 # Clean previous builds
 Write-Host "Cleaning previous builds..." -ForegroundColor Yellow
-if (Test-Path "bin") { Remove-Item -Recurse -Force "bin" }
-if (Test-Path "obj") { Remove-Item -Recurse -Force "obj" }
-if (Test-Path "publish") { Remove-Item -Recurse -Force "publish" }
+if (Test-Path "bin") { Remove-Item -Recurse -Force "bin" -ErrorAction SilentlyContinue }
+if (Test-Path "obj") { Remove-Item -Recurse -Force "obj" -ErrorAction SilentlyContinue }
+
+if (Test-Path "publish") {
+    Write-Host "Removing existing publish directory..." -ForegroundColor Yellow
+    try {
+        Remove-Item -Recurse -Force "publish" -ErrorAction Stop
+    } catch {
+        Write-Host "Waiting for file locks to be released..." -ForegroundColor Yellow
+        Start-Sleep -Seconds 2
+        try {
+            Remove-Item -Recurse -Force "publish" -ErrorAction Stop
+        } catch {
+            Write-Host "WARNING: Could not fully remove publish. Attempting to remove individual files..." -ForegroundColor Yellow
+            Remove-Item -Force "publish\*.*" -ErrorAction SilentlyContinue
+        }
+    }
+}
 
 Write-Host "Done." -ForegroundColor Green
 Write-Host ""
@@ -42,6 +69,18 @@ Write-Host ""
 
 # Publish as single file
 Write-Host "Publishing as single file executable..." -ForegroundColor Yellow
+
+# Ensure existing executable is removed before publish
+if (Test-Path "publish\ChatMouse.exe") {
+    Write-Host "Removing existing ChatMouse.exe before publish..." -ForegroundColor Yellow
+    try {
+        Remove-Item -Force "publish\ChatMouse.exe" -ErrorAction Stop
+        Start-Sleep -Seconds 1
+    } catch {
+        Write-Host "WARNING: Could not remove existing ChatMouse.exe. It may be locked." -ForegroundColor Yellow
+    }
+}
+
 dotnet publish ChatMouse.csproj -c $Configuration -r $Runtime `
     -p:PublishSingleFile=true `
     -p:SelfContained=true `
@@ -54,6 +93,12 @@ dotnet publish ChatMouse.csproj -c $Configuration -r $Runtime `
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Publish failed." -ForegroundColor Red
+    Write-Host ""
+    Write-Host "Troubleshooting:" -ForegroundColor Yellow
+    Write-Host "1. Make sure ChatMouse.exe is not running"
+    Write-Host "2. Close any file explorer windows showing the publish folder"
+    Write-Host "3. Check if antivirus is scanning the file"
+    Write-Host "4. Try running this script as administrator"
     exit 1
 }
 Write-Host "Done." -ForegroundColor Green

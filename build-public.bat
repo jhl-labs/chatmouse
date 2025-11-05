@@ -68,11 +68,37 @@ if errorlevel 1 (
 )
 echo.
 
+REM Kill running ChatMouse processes before cleanup
+echo Checking for running ChatMouse processes...
+taskkill /F /IM ChatMouse.exe >nul 2>&1
+if errorlevel 1 (
+    echo No running ChatMouse.exe found.
+) else (
+    echo Terminated running ChatMouse.exe processes.
+    timeout /t 2 /nobreak >nul
+)
+echo.
+
 REM Clean previous builds
 echo Cleaning previous builds...
 if exist bin rmdir /s /q bin 2>nul
 if exist obj rmdir /s /q obj 2>nul
-if exist %OUTPUT_DIR% rmdir /s /q %OUTPUT_DIR% 2>nul
+
+REM Try to remove publish directory with retry
+if exist %OUTPUT_DIR% (
+    echo Removing existing %OUTPUT_DIR% directory...
+    rmdir /s /q %OUTPUT_DIR% 2>nul
+    if exist %OUTPUT_DIR% (
+        echo Waiting for file locks to be released...
+        timeout /t 2 /nobreak >nul
+        rmdir /s /q %OUTPUT_DIR% 2>nul
+        if exist %OUTPUT_DIR% (
+            echo WARNING: Could not fully remove %OUTPUT_DIR%. Some files may be locked.
+            echo Attempting to remove individual files...
+            del /F /Q %OUTPUT_DIR%\*.* >nul 2>&1
+        )
+    )
+)
 echo Done.
 echo.
 
@@ -108,6 +134,13 @@ if exist ChatMouse.Tests\ChatMouse.Tests.csproj (
 
 REM Publish as single file executable
 echo Publishing as single file executable...
+REM Ensure publish directory doesn't exist before publish
+if exist %OUTPUT_DIR%\ChatMouse.exe (
+    echo Removing existing ChatMouse.exe before publish...
+    del /F /Q %OUTPUT_DIR%\ChatMouse.exe >nul 2>&1
+    timeout /t 1 /nobreak >nul
+)
+
 dotnet publish ChatMouse.csproj -c %CONFIGURATION% -r %RUNTIME% ^
     -p:PublishSingleFile=true ^
     -p:SelfContained=true ^
@@ -122,6 +155,12 @@ dotnet publish ChatMouse.csproj -c %CONFIGURATION% -r %RUNTIME% ^
 
 if errorlevel 1 (
     echo ERROR: Publish failed
+    echo.
+    echo Troubleshooting:
+    echo 1. Make sure ChatMouse.exe is not running
+    echo 2. Close any file explorer windows showing the publish folder
+    echo 3. Check if antivirus is scanning the file
+    echo 4. Try running this script as administrator
     exit /b 1
 )
 echo Done.

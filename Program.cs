@@ -264,6 +264,7 @@ public class AppConfig
 
     public bool tray_mode { get; set; } = false;
     public string hotkey { get; set; } = "Ctrl+Shift+Space";
+    public int request_timeout_seconds { get; set; } = 10;
 }
 
 #endregion
@@ -275,6 +276,13 @@ public static class App
     private const string MutexName = "Global\\ChatMouse_Mutex_v1";
     private const string IpcWindowTitle = "ChatMouse_IPC_v1";
     private const int WM_COPYDATA = 0x004A;
+
+        // Config live state & watcher
+        private static AppConfig? _cfgCurrent;
+        public static AppConfig GetCurrentConfig() => _cfgCurrent ?? new AppConfig();
+        public static event Action<AppConfig>? ConfigChanged;
+        private static FileSystemWatcher? _cfgWatcher;
+        private static System.Threading.Timer? _cfgDebounce;
 
     private static string GetBaseDirectory()
     {
@@ -338,9 +346,12 @@ public static class App
             };
 
             var cfg = LoadConfig();
+            _cfgCurrent = cfg;
             Logger.Info($"Config loaded. tray_mode={cfg.tray_mode}, hotkey={cfg.hotkey}, base_url={cfg.base_url}, model={cfg.model}, proxy={(cfg.http_proxy ?? "null")}, ssl_off={cfg.disable_ssl_verify}");
 
             _httpGlobal = CreateHttp(cfg);
+
+            StartConfigWatcher();
 
             _ipcWindow = new IpcWindow();
             _ipcWindow.ReceivedPayload += async (_, payload) =>
@@ -349,7 +360,8 @@ public static class App
                 {
                     Logger.Info($"IPC payload received len={payload?.Length ?? 0}");
                     using var cts = new CancellationTokenSource();
-                    await TriggerOnceAsync(cfg, _httpGlobal!, cts.Token, payload ?? string.Empty, IntPtr.Zero);
+                    var liveCfg = GetCurrentConfig();
+                    await TriggerOnceAsync(liveCfg, _httpGlobal!, cts.Token, payload ?? string.Empty, IntPtr.Zero);
                 }
                 catch (Exception ex) { Logger.Error(ex, "IPC Trigger failed"); }
             };
@@ -362,7 +374,7 @@ public static class App
             else
             {
                 Logger.Info("One-shot mode...");
-                _ = TriggerOnceAsync(cfg, _httpGlobal!, CancellationToken.None, null, IntPtr.Zero);
+                _ = TriggerOnceAsync(GetCurrentConfig(), _httpGlobal!, CancellationToken.None, null, IntPtr.Zero);
                 WinFormsApp.Run();
             }
         }
@@ -444,23 +456,33 @@ public static class App
 
     private sealed class TrayContext : ApplicationContext
     {
-        private readonly AppConfig _cfg;
-        private readonly HttpClient _http;
+        private AppConfig _cfg;
+        private HttpClient _http;
         private readonly NotifyIcon _tray;
         private readonly HotkeyWindow _hotkeyWnd;
+        private readonly SynchronizationContext _uiCtx;
 
         public TrayContext(AppConfig cfg, HttpClient http)
         {
             Logger.Info("TrayContext ctor");
             _cfg = cfg; _http = http;
+            _uiCtx = SynchronizationContext.Current ?? new SynchronizationContext();
 
             var menu = new ContextMenuStrip();
             var miShow = new ToolStripMenuItem("Show ( " + (_cfg.hotkey) + " )");
             miShow.Click += (_, __) => TriggerWithHwnd(IntPtr.Zero);
+
+            // [★ 추가] Settings 메뉴
+            var miSettings = new ToolStripMenuItem("Settings...");
+            miSettings.Click += (_, __) => ShowSettingsDialog();
+
             var miExit = new ToolStripMenuItem("Exit");
             miExit.Click += (_, __) => ExitThread();
 
-            menu.Items.Add(miShow); menu.Items.Add(new ToolStripSeparator()); menu.Items.Add(miExit);
+            menu.Items.Add(miShow);
+            menu.Items.Add(miSettings); // [★ 추가]
+            menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add(miExit);
 
             _tray = new NotifyIcon
             {
@@ -469,12 +491,7 @@ public static class App
             };
             _tray.DoubleClick += (_, __) => TriggerWithHwnd(IntPtr.Zero);
 
-            try
-            {
-                var icoPath = Path.Combine(GetBaseDirectory(), "icon.ico");
-                if (File.Exists(icoPath)) { _tray.Icon = new Icon(icoPath); Logger.Info("Custom tray icon loaded"); }
-            }
-            catch (Exception ex) { Logger.Warn("Tray icon load failed: " + ex.Message); }
+            // 트레이 아이콘은 실행 파일 아이콘을 그대로 사용 (csproj에서 img/icon.ico 지정)
 
             _hotkeyWnd = new HotkeyWindow();
             if (!TryRegisterHotkey(_hotkeyWnd, _cfg.hotkey))
@@ -490,6 +507,9 @@ public static class App
 
             _hotkeyWnd.HotkeyPressed += (_, hwndAtPress) => TriggerWithHwnd(hwndAtPress);
 
+            // 구독: 설정 변경 시 즉시 반영
+            ConfigChanged += OnConfigChanged;
+
             // first-run: show once
             var oneShot = new Timer { Interval = 150 };
             oneShot.Tick += (_, __) =>
@@ -503,7 +523,7 @@ public static class App
         private void TriggerWithHwnd(IntPtr hwndAtPress)
         {
             Logger.Info($"Trigger from tray/hotkey (hwnd=0x{hwndAtPress.ToInt64():X})");
-            _ = TriggerOnceAsync(_cfg, _http, CancellationToken.None, null, hwndAtPress);
+            _ = TriggerOnceAsync(GetCurrentConfig(), App._httpGlobal!, CancellationToken.None, null, hwndAtPress);
         }
 
         protected override void ExitThreadCore()
@@ -511,7 +531,67 @@ public static class App
             Logger.Info("TrayContext Exit");
             try { _hotkeyWnd.Dispose(); } catch { }
             try { _tray.Visible = false; _tray.Dispose(); } catch { }
+            try { ConfigChanged -= OnConfigChanged; } catch { }
             base.ExitThreadCore();
+        }
+
+    private void OnConfigChanged(AppConfig newCfg)
+    {
+        try
+        {
+            _uiCtx.Post(_ =>
+            {
+                var oldHotkey = _cfg.hotkey;
+                _cfg = newCfg;
+                _http = App._httpGlobal!;
+
+                // 메뉴 텍스트 갱신
+                if (_tray.ContextMenuStrip?.Items.Count > 0 && _tray.ContextMenuStrip.Items[0] is ToolStripMenuItem miShow)
+                    miShow.Text = "Show ( " + _cfg.hotkey + " )";
+
+                // ✅ 핫키가 바뀐 경우에만 재등록
+                if (!string.Equals(oldHotkey, _cfg.hotkey, StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!TryRegisterHotkey(_hotkeyWnd, _cfg.hotkey))
+                    {
+                        _tray.ShowBalloonTip(3000, "ChatMouse",
+                            $"Hotkey '{_cfg.hotkey}' 재등록 실패. 설정에서 다른 키 조합을 선택하세요.",
+                            ToolTipIcon.Warning);
+                    }
+                    else
+                    {
+                        _tray.ShowBalloonTip(1200, "ChatMouse", $"핫키 변경됨: {_cfg.hotkey}", ToolTipIcon.Info);
+                    }
+                }
+                // 같으면 재등록하지 않음 (중복 호출/경고 스팸 방지)
+
+            }, null);
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn("OnConfigChanged handler error: " + ex.Message);
+        }
+    }
+
+
+        // [★ 추가] 설정창 호출 + 저장 처리
+        private void ShowSettingsDialog()
+        {
+            try
+            {
+                using var dlg = new ConfigForm(App.GetCurrentConfig());
+                if (dlg.ShowDialog() == DialogResult.OK)
+                {
+                    var newCfg = dlg.GetConfig();
+                    App.SaveConfig(newCfg); // 파일 저장 + 런타임 반영 + 이벤트 발행
+                    _tray.ShowBalloonTip(1500, "ChatMouse", "설정이 저장되었습니다.", ToolTipIcon.Info);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Error(ex, "ShowSettingsDialog failed");
+                MessageBox.Show("설정 창 오류: " + ex.Message, "ChatMouse", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
         }
     }
 
@@ -545,8 +625,11 @@ public static class App
         public void Dispose() { try { DestroyHandle(); } catch { } }
     }
 
-    [DllImport("user32.dll")] private static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
-    [DllImport("user32.dll")] private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
 
     private const uint MOD_ALT = 0x0001, MOD_CONTROL = 0x0002, MOD_SHIFT = 0x0004, MOD_WIN = 0x0008;
     private static readonly int HotkeyId = 0xB00B;
@@ -554,9 +637,29 @@ public static class App
     private static bool TryRegisterHotkey(HotkeyWindow wnd, string hotkey)
     {
         ParseHotkey(hotkey, out uint mods, out uint key);
+
+        // 먼저 해제 시도 (오류 무시)
         _ = UnregisterHotKey(wnd.Handle, HotkeyId);
-        return RegisterHotKey(wnd.Handle, HotkeyId, mods, key);
+
+        if (!RegisterHotKey(wnd.Handle, HotkeyId, mods, key))
+        {
+            int err = Marshal.GetLastWin32Error();
+            string reason = err switch
+            {
+                1409 => "이미 동일한 전역 핫키가 등록되어 있습니다 (ERROR_HOTKEY_ALREADY_REGISTERED). " +
+                        "다른 프로그램이 사용 중이거나, 같은 핫키를 중복 등록하려 했을 수 있습니다.",
+                87   => "잘못된 매개변수 (ERROR_INVALID_PARAMETER). 키 파싱 결과를 확인하세요.",
+                _    => $"Win32 오류 코드={err}"
+            };
+
+            Logger.Warn($"Hotkey '{hotkey}' register failed. {reason}");
+            return false;
+        }
+
+        Logger.Info($"Hotkey '{hotkey}' registered successfully.");
+        return true;
     }
+
 
     private static void ParseHotkey(string s, out uint mods, out uint key)
     {
@@ -667,13 +770,14 @@ public static class App
         var handler = new HttpClientHandler();
         if (!string.IsNullOrWhiteSpace(cfg.http_proxy)) { handler.Proxy = new WebProxy(cfg.http_proxy); handler.UseProxy = true; Logger.Info($"Proxy enabled: {cfg.http_proxy}"); }
         if (cfg.disable_ssl_verify) { handler.ServerCertificateCustomValidationCallback = static (_, __, ___, ____) => true; Logger.Warn("SSL verification disabled"); }
-        return new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(10) };
+        int timeoutSeconds = cfg.request_timeout_seconds > 0 ? cfg.request_timeout_seconds : 10;
+        return new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(timeoutSeconds) };
     }
 
-    private static AppConfig LoadConfig()
+private static AppConfig LoadConfig()
+{
+    if (!File.Exists(ConfigPath))
     {
-        if (!File.Exists(ConfigPath))
-        {
             var sample = new AppConfig
             {
                 base_url = "http://127.0.0.1:8000/v1",
@@ -684,26 +788,125 @@ public static class App
                 http_proxy = null,
                 disable_ssl_verify = false,
                 tray_mode = true,
-                hotkey = "Ctrl+Shift+Space"
+                hotkey = "Ctrl+Shift+Space",
+                request_timeout_seconds = 10
             };
-            string json = JsonSerializer.Serialize(sample, JsonOpts);
-            File.WriteAllText(ConfigPath, json, new UTF8Encoding(false));
-            Logger.Info("config.json created with defaults");
-            return sample;
-        }
+        string json = JsonSerializer.Serialize(sample, JsonOpts);
+        File.WriteAllText(ConfigPath, json, new UTF8Encoding(false));
+        Logger.Info("config.json created with defaults");
+        return sample;
+    }
 
-        string raw = File.ReadAllText(ConfigPath, Encoding.UTF8);
-        var cfg = JsonSerializer.Deserialize<AppConfig>(raw, JsonOpts) ?? new AppConfig();
+    string raw = File.ReadAllText(ConfigPath, Encoding.UTF8);
+    var cfg = JsonSerializer.Deserialize<AppConfig>(raw, JsonOpts) ?? new AppConfig();
 
-        cfg.base_url ??= "http://127.0.0.1:8000/v1";
-        cfg.api_key ??= "EMPTY";
-        cfg.model ??= "my-vllm-model";
-        cfg.prompt ??= "다음 텍스트를 요약해줘:";
-        if (string.IsNullOrWhiteSpace(cfg.hotkey)) cfg.hotkey = "Ctrl+Shift+Space";
-        if (!raw.Contains("\"tray_mode\"")) cfg.tray_mode = true;
+    bool changed = false;
 
+    // 부족한 필드만 보정
+    if (string.IsNullOrWhiteSpace(cfg.base_url)) { cfg.base_url = "http://127.0.0.1:8000/v1"; changed = true; }
+    if (string.IsNullOrWhiteSpace(cfg.api_key)) { cfg.api_key = "EMPTY"; changed = true; }
+    if (string.IsNullOrWhiteSpace(cfg.model))   { cfg.model = "my-vllm-model"; changed = true; }
+    if (string.IsNullOrWhiteSpace(cfg.prompt))  { cfg.prompt = "다음 텍스트를 요약해줘:"; changed = true; }
+    if (string.IsNullOrWhiteSpace(cfg.hotkey))  { cfg.hotkey = "Ctrl+Shift+Space"; changed = true; }
+    if (cfg.request_timeout_seconds <= 0) { cfg.request_timeout_seconds = 10; changed = true; }
+
+    // 과거 파일 호환: 키 자체가 없던 경우에만 true로 보정
+    if (!raw.Contains("\"tray_mode\"")) { cfg.tray_mode = true; changed = true; }
+
+    if (changed)
         File.WriteAllText(ConfigPath, JsonSerializer.Serialize(cfg, JsonOpts), new UTF8Encoding(false));
-        return cfg;
+
+    return cfg;
+}
+
+
+
+    private static void StartConfigWatcher()
+    {
+        try
+        {
+            string dir = Path.GetDirectoryName(ConfigPath)!;
+            string file = Path.GetFileName(ConfigPath);
+            _cfgWatcher = new FileSystemWatcher(dir, file)
+            {
+                NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.CreationTime | NotifyFilters.Attributes | NotifyFilters.FileName,
+                IncludeSubdirectories = false,
+                EnableRaisingEvents = true
+            };
+
+            FileSystemEventHandler onChange = (_, __) => DebounceReload();
+            RenamedEventHandler onRename = (_, __) => DebounceReload();
+            _cfgWatcher.Changed += onChange;
+            _cfgWatcher.Created += onChange;
+            _cfgWatcher.Renamed += onRename;
+            _cfgWatcher.Deleted += onChange;
+            Logger.Info("Config watcher started");
+        }
+        catch (Exception ex) { Logger.Warn("Config watcher start failed: " + ex.Message); }
+    }
+
+    private static void DebounceReload()
+    {
+        try
+        {
+            _cfgDebounce?.Dispose();
+            _cfgDebounce = new System.Threading.Timer(_ =>
+            {
+                try { ReloadConfigSafe(); }
+                catch (Exception ex) { Logger.Error(ex, "ReloadConfigSafe error"); }
+            }, null, 400, System.Threading.Timeout.Infinite);
+        }
+        catch (Exception ex) { Logger.Warn("Debounce setup failed: " + ex.Message); }
+    }
+
+    private static void ReloadConfigSafe()
+    {
+        var newCfg = LoadConfig();
+        Logger.Info($"Using config path: {ConfigPath}");
+        _cfgCurrent = newCfg;
+        Logger.Info($"Config loaded. tray_mode={newCfg.tray_mode}, hotkey={newCfg.hotkey}, base_url={newCfg.base_url}, model={newCfg.model}, proxy={(newCfg.http_proxy ?? "null")}, ssl_off={newCfg.disable_ssl_verify}");        // HTTP 재생성 (프록시/SSL 옵션 반영)
+        try
+        {
+            var old = _httpGlobal;
+            _httpGlobal = CreateHttp(newCfg);
+            try { old?.Dispose(); } catch { }
+        }
+        catch (Exception ex) { Logger.Warn("HttpClient recreate failed: " + ex.Message); }
+
+        Logger.Info($"Config reloaded. tray_mode={newCfg.tray_mode}, hotkey={newCfg.hotkey}, base_url={newCfg.base_url}, model={newCfg.model}, proxy={(newCfg.http_proxy ?? "null")}, ssl_off={newCfg.disable_ssl_verify}");
+        try { ConfigChanged?.Invoke(newCfg); } catch { }
+    }
+
+    // [★ 추가] 수동 저장 API: 파일 저장 + 런타임 반영 + 이벤트 발행
+    private static readonly object _cfgSaveLock = new(); // 저장 동시성 보호
+
+    public static void SaveConfig(AppConfig cfg)
+    {
+        lock (_cfgSaveLock)
+        {
+            try
+            {
+                File.WriteAllText(ConfigPath, JsonSerializer.Serialize(cfg, JsonOpts), new UTF8Encoding(false));
+                _cfgCurrent = cfg;
+
+                // HTTP 재생성 (프록시/SSL 옵션 반영)
+                try
+                {
+                    var old = _httpGlobal;
+                    _httpGlobal = CreateHttp(cfg);
+                    try { old?.Dispose(); } catch { }
+                }
+                catch (Exception ex) { Logger.Warn("HttpClient recreate failed after SaveConfig: " + ex.Message); }
+
+                Logger.Info("SaveConfig: config.json updated by user settings.");
+                try { ConfigChanged?.Invoke(cfg); } catch { }
+            }
+            catch (Exception ex)
+            {
+                Logger.Error(ex, "SaveConfig failed");
+                MessageBox.Show("설정 저장 실패: " + ex.Message, "ChatMouse", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
     }
 
     #endregion
@@ -1031,6 +1234,108 @@ public static class App
     }
 
     #endregion
+}
+
+#endregion
+
+// ===============================
+// [★ 추가] 설정창 UI (ConfigForm)
+// ===============================
+#region Settings UI
+
+public class ConfigForm : Form
+{
+    private readonly TextBox tbBaseUrl = new() { Width = 360 };
+    private readonly TextBox tbApiKey = new() { Width = 360 };
+    private readonly TextBox tbModel = new() { Width = 360 };
+    private readonly TextBox tbPrompt = new() { Width = 360, Multiline = true, Height = 60 };
+    private readonly TextBox tbHotkey = new() { Width = 200 };
+    private readonly TextBox tbProxy = new() { Width = 360 };
+    private readonly NumericUpDown nudTimeout = new() { Width = 100, Minimum = 1, Maximum = 300, DecimalPlaces = 0 };
+    private readonly CheckBox cbAllowClip = new() { Text = "Allow clipboard probe" };
+    private readonly CheckBox cbTrayMode = new() { Text = "Start in tray mode" };
+    private readonly CheckBox cbSslOff = new() { Text = "Disable SSL verification" };
+
+    private readonly Button btnOk = new() { Text = "OK", DialogResult = DialogResult.OK };
+    private readonly Button btnCancel = new() { Text = "Cancel", DialogResult = DialogResult.Cancel };
+
+    private AppConfig _cfg;
+
+    public ConfigForm(AppConfig cfg)
+    {
+        _cfg = cfg;
+        Text = "ChatMouse Settings";
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        StartPosition = FormStartPosition.CenterParent;
+        MaximizeBox = false; MinimizeBox = false;
+        Width = 460; Height = 590;
+
+        var layout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            Padding = new Padding(12),
+            ColumnCount = 2,
+            AutoSize = true
+        };
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+
+        void AddRow(string label, Control ctrl)
+        {
+            int row = layout.RowCount++;
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.Controls.Add(new Label { Text = label, AutoSize = true, Anchor = AnchorStyles.Left }, 0, row);
+            layout.Controls.Add(ctrl, 1, row);
+        }
+
+        AddRow("Base URL:", tbBaseUrl);
+        AddRow("API Key:", tbApiKey);
+        AddRow("Model:", tbModel);
+        AddRow("Prompt:", tbPrompt);
+        AddRow("Hotkey:", tbHotkey);
+        AddRow("HTTP Proxy:", tbProxy);
+        AddRow("Request Timeout (seconds):", nudTimeout);
+        AddRow("", cbAllowClip);
+        AddRow("", cbTrayMode);
+        AddRow("", cbSslOff);
+
+        var btnPanel = new FlowLayoutPanel { Dock = DockStyle.Bottom, FlowDirection = FlowDirection.RightToLeft, Padding = new Padding(12) };
+        btnPanel.Controls.Add(btnOk);
+        btnPanel.Controls.Add(btnCancel);
+
+        Controls.Add(layout);
+        Controls.Add(btnPanel);
+
+        // 초기값 바인딩
+        tbBaseUrl.Text = cfg.base_url;
+        tbApiKey.Text = cfg.api_key;
+        tbModel.Text = cfg.model;
+        tbPrompt.Text = cfg.prompt;
+        tbHotkey.Text = cfg.hotkey;
+        tbProxy.Text = cfg.http_proxy ?? "";
+        nudTimeout.Value = cfg.request_timeout_seconds > 0 ? cfg.request_timeout_seconds : 10;
+        cbAllowClip.Checked = cfg.allow_clipboard_probe;
+        cbTrayMode.Checked = cfg.tray_mode;
+        cbSslOff.Checked = cfg.disable_ssl_verify;
+
+        // OK 클릭 시 종료(값은 호출자가 GetConfig로 수집)
+        btnOk.Click += (_, __) => { DialogResult = DialogResult.OK; Close(); };
+        btnCancel.Click += (_, __) => { DialogResult = DialogResult.Cancel; Close(); };
+    }
+
+    public AppConfig GetConfig() => new()
+    {
+        base_url = tbBaseUrl.Text.Trim(),
+        api_key = tbApiKey.Text.Trim(),
+        model = tbModel.Text.Trim(),
+        prompt = tbPrompt.Text,
+        hotkey = tbHotkey.Text.Trim(),
+        allow_clipboard_probe = cbAllowClip.Checked,
+        tray_mode = cbTrayMode.Checked,
+        http_proxy = string.IsNullOrWhiteSpace(tbProxy.Text) ? null : tbProxy.Text.Trim(),
+        disable_ssl_verify = cbSslOff.Checked,
+        request_timeout_seconds = (int)nudTimeout.Value
+    };
 }
 
 #endregion
