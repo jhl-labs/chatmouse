@@ -38,7 +38,7 @@ echo Publishing as single file executable...
 dotnet publish ChatMouse.csproj -c Release -r win-x64 ^
     -p:PublishSingleFile=true ^
     -p:SelfContained=true ^
-    -p:IncludeNativeLibrariesForSelfContract=true ^
+    -p:IncludeNativeLibrariesForSelfContained=true ^
     -p:IncludeAllContentForSelfExtract=true ^
     -p:EnableCompressionInSingleFile=true ^
     -p:PublishTrimmed=false ^
