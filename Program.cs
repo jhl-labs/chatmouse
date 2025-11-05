@@ -1,6 +1,9 @@
 // Program.cs - ChatMouse (single-instance, tray, hotkey, FlaUI selection, IPC with WM_COPYDATA)
-// Tooltip is interactive when clicked: selectable/copyable RichTextBox with pause of auto-dismiss.
-// 2025-11-05: Ensure tooltip reliably shows (remove NOACTIVATE style, force top-most via SetWindowPos, extra logging)
+// Hotkey focus stability:
+//  - Capture foreground HWND at hotkey moment and pass it down.
+//  - Wait modifiers to be released.
+//  - Optionally SetForegroundWindow(savedHwnd) before Ctrl+C probe.
+//  - Hidden hotkey window uses WS_EX_NOACTIVATE so focus is not stolen.
 
 #region Using
 
@@ -92,7 +95,7 @@ static class Logger
 
 #endregion
 
-#region Tooltip Form (interactive)
+#region Tooltip Form
 
 public class PrettyTooltipForm : Form
 {
@@ -113,10 +116,6 @@ public class PrettyTooltipForm : Form
     private readonly Stopwatch _life = new();
     private const int GraceMs = 3000;
 
-    // Interactive content
-    private readonly RichTextBox _rtb;
-    private bool _userInteracting = false;
-
     public PrettyTooltipForm(string initialText)
     {
         _text = initialText ?? "";
@@ -128,47 +127,6 @@ public class PrettyTooltipForm : Form
         Opacity = 0.0;
         BackColor = Color.Lime;
         TransparencyKey = Color.Lime;
-
-        // RichTextBox for selectable/copyable text
-        _rtb = new RichTextBox
-        {
-            ReadOnly = true,
-            BorderStyle = BorderStyle.None,
-            DetectUrls = false,
-            ShortcutsEnabled = true,
-            ScrollBars = RichTextBoxScrollBars.None,
-            WordWrap = true,
-            TabStop = false,
-            BackColor = Ui.BgBottom,
-            ForeColor = Ui.Text,
-            Font = Ui.Font
-        };
-        Controls.Add(_rtb);
-
-        // Context menu (Copy / Select All)
-        var menu = new ContextMenuStrip();
-        var miCopy = new ToolStripMenuItem("Copy", null, (_, __) => { try { if (_rtb.SelectionLength == 0) _rtb.SelectAll(); _rtb.Copy(); } catch { } });
-        var miSelAll = new ToolStripMenuItem("Select All", null, (_, __) => { _rtb.SelectAll(); });
-        menu.Items.Add(miCopy);
-        menu.Items.Add(miSelAll);
-        _rtb.ContextMenuStrip = menu;
-
-        // Double-click -> SelectAll + Copy + brief feedback
-        _rtb.DoubleClick += (_, __) =>
-        {
-            try
-            {
-                _rtb.SelectAll();
-                _rtb.Copy();
-                ShowCopiedToast();
-            }
-            catch { }
-        };
-
-        // Track interaction state
-        _rtb.MouseDown += (_, __) => { _userInteracting = true; Activate(); };
-        _rtb.MouseUp += (_, __) => { _userInteracting = true; };
-        _rtb.KeyDown += (_, __) => { _userInteracting = true; };
 
         _animTimer.Tick += (s, e) =>
         {
@@ -184,89 +142,38 @@ public class PrettyTooltipForm : Form
         _cursorWatch.Tick += (s, e) =>
         {
             if (_life.ElapsedMilliseconds < GraceMs) return;
-
-            var curScreen = Cursor.Position;
-            var curClient = PointToClient(curScreen);
-            bool inside = ClientRectangle.Contains(curClient);
-
-            if (_userInteracting || inside) return;
-
             var cur = Cursor.Position;
             if (Math.Abs(cur.X - _anchorCursor.X) > JitterPx || Math.Abs(cur.Y - _anchorCursor.Y) > JitterPx)
-            {
-                _cursorWatch.Stop();
-                BeginFadeOut();
-            }
+            { _cursorWatch.Stop(); BeginFadeOut(); }
         };
-
-        Deactivate += (_, __) =>
-        {
-            if (_life.ElapsedMilliseconds < GraceMs) return;
-            var curClient = PointToClient(Cursor.Position);
-            if (!ClientRectangle.Contains(curClient))
-                BeginFadeOut();
-        };
-
-        MouseDown += (_, __) => { _userInteracting = true; Activate(); _rtb.Focus(); };
 
         KeyPreview = true;
         KeyDown += (_, e) => { if (e.KeyCode == Keys.Escape) BeginFadeOut(); };
 
         _anchorCursor = Cursor.Position;
         RecalcSizeAndPlaceNearCursor(_anchorCursor);
-        _rtb.Text = _text;
     }
 
-    private void ShowCopiedToast()
-    {
-        Text = "Copied!";
-        var t = new Timer { Interval = 600 };
-        t.Tick += (_, __) => { t.Stop(); t.Dispose(); Text = ""; };
-        t.Start();
-    }
-
-    protected override bool ShowWithoutActivation => true; // 표시 때 활성화는 안 해도 됨(클릭 시 Activate)
+    protected override bool ShowWithoutActivation => true;
     protected override CreateParams CreateParams
     {
         get
         {
             const int CS_DROPSHADOW = 0x00020000;
             const int WS_EX_TOOLWINDOW = 0x00000080;
-            // **주의**: WS_EX_NOACTIVATE 제거 (일부 환경에서 표시 자체가 안되는 경우 방지)
+            const int WS_EX_NOACTIVATE = 0x08000000;
             var cp = base.CreateParams;
             cp.ClassStyle |= CS_DROPSHADOW;
-            cp.ExStyle |= WS_EX_TOOLWINDOW;
+            cp.ExStyle |= WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
             return cp;
         }
     }
     protected override void OnShown(EventArgs e)
-    {
-        base.OnShown(e);
-        Logger.Info($"Tooltip OnShown (Size={Width}x{Height}, Loc={Location})");
-        BeginFadeIn();
-        _life.Restart();
-        _cursorWatch.Start();
-        Logger.Info("Tooltip shown & timers started");
-    }
+    { base.OnShown(e); BeginFadeIn(); _life.Restart(); _cursorWatch.Start(); Logger.Info("Tooltip shown"); }
 
-    public void SetText(string t)
-    {
-        _text = t ?? "";
-        _rtb.Text = _text;
-        RecalcSizeAndPlaceNearCursor(_anchorCursor);
-        Invalidate();
-        Logger.Info($"Tooltip text set (len={_text.Length})");
-    }
-
+    public void SetText(string t) { _text = t ?? ""; RecalcSizeAndPlaceNearCursor(_anchorCursor); Invalidate(); Logger.Info($"Tooltip text set (len={_text.Length})"); }
     public void BeginFadeIn() { _mode = AnimMode.FadeIn; _animStart = DateTime.Now; Opacity = 0.0; _animTimer.Start(); }
-    public void BeginFadeOut()
-    {
-        if (_mode == AnimMode.FadeOut) return;
-        _mode = AnimMode.FadeOut;
-        _animStart = DateTime.Now;
-        _animTimer.Start();
-        Logger.Info("Tooltip fade-out started");
-    }
+    public void BeginFadeOut() { if (_mode == AnimMode.FadeOut) return; _mode = AnimMode.FadeOut; _animStart = DateTime.Now; _animTimer.Start(); Logger.Info("Tooltip fade-out started"); }
 
     private static double EaseOutCubic(double t) { t = 1 - t; return 1 - t * t * t; }
 
@@ -276,12 +183,11 @@ public class PrettyTooltipForm : Form
         {
             Size proposed = new(Ui.MaxWidth, int.MaxValue);
             var flags = TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix | TextFormatFlags.TextBoxControl | TextFormatFlags.NoPadding;
-
             Size measured = TextRenderer.MeasureText(g, string.IsNullOrEmpty(_text) ? " " : _text, Ui.Font, proposed, flags);
             int w = Math.Max(240, measured.Width + Ui.Pad.Horizontal + 6);
             int h = Math.Max(96, measured.Height + Ui.Pad.Vertical + 6);
-
             Size = new Size(w, h);
+
             using (GraphicsPath gp = RoundedRect(new Rectangle(0, 0, w, h), Ui.Corner)) Region = new Region(gp);
 
             Rectangle workArea = Screen.FromPoint(anchor).WorkingArea;
@@ -291,10 +197,7 @@ public class PrettyTooltipForm : Form
             if (x < workArea.Left) x = workArea.Left + SpawnOffset;
             if (y < workArea.Top) y = workArea.Top + SpawnOffset;
             Location = new Point(x, y);
-
-            _rtb.SetBounds(Ui.Pad.Left, Ui.Pad.Top, Width - Ui.Pad.Horizontal, Height - Ui.Pad.Vertical);
         }
-        Logger.Info($"Tooltip placed at {Location} size {Size}");
     }
 
     protected override void OnPaint(PaintEventArgs e)
@@ -312,6 +215,9 @@ public class PrettyTooltipForm : Form
         using var lg = new LinearGradientBrush(rect, Ui.BgTop, Ui.BgBottom, 90f);
         g.FillPath(lg, bgPath);
         using var border = new Pen(Ui.Border, 1f); g.DrawPath(border, bgPath);
+
+        var textRect = new Rectangle(Ui.Pad.Left, Ui.Pad.Top, Width - Ui.Pad.Horizontal, Height - Ui.Pad.Vertical);
+        TextRenderer.DrawText(g, _text, Ui.Font, textRect, Ui.Text, TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix | TextFormatFlags.TextBoxControl | TextFormatFlags.NoPadding);
     }
 
     private static GraphicsPath RoundedRect(Rectangle bounds, int radius)
@@ -594,7 +500,7 @@ public static class App
             {
                 Caption = "ChatMouse_HotkeySink",
                 Style = unchecked((int)0x80000000), // WS_POPUP
-                ExStyle = 0x80 // WS_EX_TOOLWINDOW
+                ExStyle = 0x80 | 0x08000000        // WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
             };
             CreateHandle(cp);
         }
@@ -603,6 +509,7 @@ public static class App
         {
             if (m.Msg == WM_HOTKEY)
             {
+                // Capture current foreground hwnd *before* we do anything else
                 IntPtr hwnd = GetForegroundWindow();
                 HotkeyPressed?.Invoke(this, hwnd);
             }
@@ -665,22 +572,12 @@ public static class App
 
     #region Trigger Once
 
-    // SetWindowPos to force top-most & visible
-    private static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
-    private const uint SWP_NOSIZE = 0x0001;
-    private const uint SWP_NOMOVE = 0x0002;
-    private const uint SWP_NOACTIVATE = 0x0010;
-    private const uint SWP_SHOWWINDOW = 0x0040;
-
-    [DllImport("user32.dll")]
-    private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter,
-        int X, int Y, int cx, int cy, uint uFlags);
-
     private static async Task TriggerOnceAsync(AppConfig cfg, HttpClient http, CancellationToken externalCt, string? presetContextOrNull, IntPtr hwndAtPress)
     {
         await Task.Yield();
         Logger.Info($"TriggerOnceAsync begin (hwndAtPress=0x{hwndAtPress.ToInt64():X})");
 
+        // Wait until modifiers are released (prevents interfering with Ctrl+C probe etc.)
         await WaitForModifiersReleasedAsync(TimeSpan.FromMilliseconds(250));
 
         var tooltip = new PrettyTooltipForm("⏳ 선택 텍스트 확인 중…");
@@ -731,12 +628,8 @@ public static class App
             { Logger.Error(ex, "TriggerOnceAsync error"); tooltip.SetText($"❌ Error: {ex.Message}"); }
         };
 
-        // Show & force on top/visible (handles edge cases where TopMost+no-activate windows are hidden)
         tooltip.Show();
-        tooltip.BringToFront();
-        SetWindowPos(tooltip.Handle, HWND_TOPMOST, 0, 0, 0, 0, SWP_SHOWWINDOW | SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-
-        Logger.Info("Tooltip.Show called & SetWindowPos applied");
+        Logger.Info("Tooltip.Show called");
     }
 
     #endregion
@@ -908,9 +801,10 @@ public static class App
 
     private static async Task<string?> GetContextTextPreferSelectionAsync(AppConfig cfg, CancellationToken outerCt, IntPtr hwndAtPress)
     {
+        // 0) If we got hwnd from hotkey moment, prefer using it
         IntPtr targetHwnd = hwndAtPress != IntPtr.Zero ? hwndAtPress : GetForegroundWindow();
 
-        // UIA3
+        // 1) UIA3 selection via saved hwnd → focused element
         try
         {
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(outerCt);
@@ -920,11 +814,18 @@ public static class App
                 try
                 {
                     using var automation = new UIA3Automation();
-                    var element = automation.FocusedElement();
-                    if (element == null && targetHwnd != IntPtr.Zero)
+                    var element = automation.FocusedElement(); // After hotkey, focus may still be correct
+                    if (element == null || targetHwnd != IntPtr.Zero)
                     {
-                        try { element = automation.FromHandle(targetHwnd); } catch { }
+                        // Try from saved hwnd
+                        try
+                        {
+                            var fromHwnd = automation.FromHandle(targetHwnd);
+                            if (fromHwnd != null) element = fromHwnd;
+                        }
+                        catch { }
                     }
+
                     if (element == null) return null;
 
                     ITextPattern? textPat = element.Patterns?.Text?.PatternOrDefault;
@@ -953,7 +854,7 @@ public static class App
         catch (OperationCanceledException) when (outerCt.IsCancellationRequested) { throw; }
         catch (Exception ex) { Logger.Warn("FlaUI stage exception: " + ex.Message); }
 
-        // Win32 Edit/RichEdit
+        // 2) Win32 Edit/RichEdit
         try
         {
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(outerCt);
@@ -995,7 +896,7 @@ public static class App
         catch (OperationCanceledException) when (outerCt.IsCancellationRequested) { throw; }
         catch (Exception ex) { Logger.Warn("Win32 stage exception: " + ex.Message); }
 
-        // Ctrl+C Probe
+        // 3) Ctrl+C Probe (restore focus to saved hwnd)
         if (cfg.allow_clipboard_probe)
         {
             try
@@ -1010,9 +911,10 @@ public static class App
                     try
                     {
                         if (targetHwnd != IntPtr.Zero) SetForegroundWindow(targetHwnd);
-                        Thread.Sleep(80);
+                        Thread.Sleep(80); // allow activation
+
                         SendCtrlC();
-                        Thread.Sleep(140);
+                        Thread.Sleep(140); // let clipboard update
                         if (Clipboard.ContainsText())
                         {
                             string captured = Clipboard.GetText(TextDataFormat.UnicodeText);
@@ -1033,7 +935,7 @@ public static class App
             catch (Exception ex) { Logger.Warn("Probe stage exception: " + ex.Message); }
         }
 
-        // Clipboard fallback
+        // 4) Clipboard fallback
         try
         {
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(outerCt);
