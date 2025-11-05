@@ -62,14 +62,12 @@ static class Logger
     private static StreamWriter? _writer;
     private static string GetBaseDirectory()
     {
-        // 실행 파일이 있는 디렉터리를 기준으로 사용
         if (!string.IsNullOrEmpty(Environment.ProcessPath))
         {
             string? dir = Path.GetDirectoryName(Environment.ProcessPath);
             if (!string.IsNullOrEmpty(dir))
                 return dir;
         }
-        // 폴백: AppContext.BaseDirectory 사용
         return AppContext.BaseDirectory;
     }
     private static string _path = Path.Combine(GetBaseDirectory(), "ChatMouse.log");
@@ -108,13 +106,15 @@ static class Logger
 
 #endregion
 
-#region Tooltip Form
+#region Tooltip Form (auto-close tuned + close button in Text mode)
 
 public class PrettyTooltipForm : Form
 {
     private string _text;
     private readonly Timer _animTimer = new() { Interval = 16 };
     private readonly Timer _cursorWatch = new() { Interval = 30 };
+    private readonly TextBox _textBox;
+    private readonly Button _btnClose;   // 닫기 버튼
 
     private enum AnimMode { None, FadeIn, FadeOut }
     private AnimMode _mode = AnimMode.None;
@@ -123,11 +123,20 @@ public class PrettyTooltipForm : Form
     private const int FadeOutMs = 180;
 
     private Point _anchorCursor;
-    private const int JitterPx = 4;
     private const int SpawnOffset = 12;
 
     private readonly Stopwatch _life = new();
     private const int GraceMs = 3000;
+    private bool _isMouseOver = false;
+    private bool _useTextBox = false;
+
+    // 접근 유예(초기 2초)
+    private DateTime _approachUntil;
+
+    // 접근/이탈 관리
+    private bool _hasApproached = false;
+    private DateTime? _awaySince = null;
+    private const int MaxIdleMsWithoutApproach = 8000; // 접근 없이 방치 시 닫기
 
     public PrettyTooltipForm(string initialText)
     {
@@ -137,10 +146,87 @@ public class PrettyTooltipForm : Form
         TopMost = true;
         ShowInTaskbar = false;
         DoubleBuffered = true;
-        Opacity = 0.0;
-        BackColor = Color.Lime;
-        TransparencyKey = Color.Lime;
 
+        BackColor = Color.FromArgb(24, 24, 24);
+        Opacity = 0.0;
+
+        SetStyle(ControlStyles.AllPaintingInWmPaint |
+                 ControlStyles.OptimizedDoubleBuffer |
+                 ControlStyles.UserPaint, true);
+        UpdateStyles();
+
+        // 텍스트 상자
+        _textBox = new TextBox
+        {
+            Text = _text,
+            Font = Ui.Font,
+            ForeColor = Ui.Text,
+            BackColor = Color.FromArgb(30, 30, 30),
+            BorderStyle = BorderStyle.None,
+            Multiline = true,
+            ReadOnly = true,
+            ScrollBars = ScrollBars.None,
+            WordWrap = true,
+            Dock = DockStyle.None,
+            TabStop = false,
+            Visible = false,
+            Enabled = false
+        };
+        Controls.Add(_textBox);
+        Controls.SetChildIndex(_textBox, Controls.Count - 1);
+
+        // ✅ 닫기 버튼 (텍스트 모드에서만 보이게)
+        _btnClose = new Button
+        {
+            Text = "×",
+            // ⬇⬇⬇ 여기만 수정: nine: 제거하고 9f 로!
+            Font = new Font("Segoe UI", 9f, FontStyle.Bold),
+            ForeColor = Color.White,
+            BackColor = Color.FromArgb(48, 48, 48),
+            FlatStyle = FlatStyle.Flat,
+            Size = new Size(26, 26),
+            TabStop = false,
+            Visible = false,
+            Anchor = AnchorStyles.Top | AnchorStyles.Right
+        };
+        _btnClose.FlatAppearance.BorderSize = 0;
+        _btnClose.FlatAppearance.MouseOverBackColor = Color.FromArgb(70, 70, 70);
+        _btnClose.FlatAppearance.MouseDownBackColor = Color.FromArgb(90, 90, 90);
+        _btnClose.Click += (_, __) => BeginFadeOut();
+        Controls.Add(_btnClose);
+
+        // 마우스/키 처리
+        MouseEnter += (s, e) =>
+        {
+            _isMouseOver = true;
+            _hasApproached = true;
+            _cursorWatch.Stop();
+        };
+        MouseLeave += (s, e) =>
+        {
+            _isMouseOver = false;
+            if (_life.ElapsedMilliseconds >= GraceMs && !_useTextBox) _cursorWatch.Start();
+        };
+        MouseClick += (s, e) =>
+        {
+            if (!_useTextBox && _isMouseOver)
+            {
+                try { Activate(); } catch { }
+                SwitchToTextBoxMode();
+                try { _textBox.Focus(); _textBox.SelectAll(); } catch { }
+            }
+        };
+        _textBox.MouseEnter += (s, e) => { _isMouseOver = true; _cursorWatch.Stop(); };
+        _textBox.MouseLeave += (s, e) => { _isMouseOver = false; };
+
+        KeyPreview = true;
+        KeyDown += (_, e) =>
+        {
+            if (e.KeyCode == Keys.Escape) BeginFadeOut();
+            if (e.Control && e.KeyCode == Keys.W) BeginFadeOut(); // Ctrl+W 닫기
+        };
+
+        // 애니메이션
         _animTimer.Tick += (s, e) =>
         {
             int dur = _mode == AnimMode.FadeIn ? FadeInMs : FadeOutMs;
@@ -152,71 +238,181 @@ public class PrettyTooltipForm : Form
             if (t >= 1) { _animTimer.Stop(); if (_mode == AnimMode.FadeOut) Close(); _mode = AnimMode.None; }
         };
 
+        // 자동 닫힘(지속 이탈 기준)
         _cursorWatch.Tick += (s, e) =>
         {
-            if (_life.ElapsedMilliseconds < GraceMs) return;
-            var cur = Cursor.Position;
-            if (Math.Abs(cur.X - _anchorCursor.X) > JitterPx || Math.Abs(cur.Y - _anchorCursor.Y) > JitterPx)
-            { _cursorWatch.Stop(); BeginFadeOut(); }
-        };
+            if (DateTime.Now < _approachUntil) return;
 
-        KeyPreview = true;
-        KeyDown += (_, e) => { if (e.KeyCode == Keys.Escape) BeginFadeOut(); };
+            if (!_hasApproached)
+            {
+                if (_life.ElapsedMilliseconds >= MaxIdleMsWithoutApproach)
+                {
+                    _cursorWatch.Stop();
+                    BeginFadeOut();
+                }
+                return;
+            }
+
+            if (_isMouseOver) { _awaySince = null; return; }
+
+            var near = this.Bounds;
+            near.Inflate(48, 48);
+
+            if (near.Contains(Cursor.Position))
+            {
+                _hasApproached = true;
+                _awaySince = null;
+                return;
+            }
+
+            if (_awaySince == null)
+            {
+                _awaySince = DateTime.Now;
+                return;
+            }
+
+            if ((DateTime.Now - _awaySince.Value).TotalMilliseconds >= 600)
+            {
+                _cursorWatch.Stop();
+                BeginFadeOut();
+            }
+        };
 
         _anchorCursor = Cursor.Position;
         RecalcSizeAndPlaceNearCursor(_anchorCursor);
     }
 
     protected override bool ShowWithoutActivation => true;
+
     protected override CreateParams CreateParams
     {
         get
         {
             const int CS_DROPSHADOW = 0x00020000;
             const int WS_EX_TOOLWINDOW = 0x00000080;
-            const int WS_EX_NOACTIVATE = 0x08000000;
             var cp = base.CreateParams;
             cp.ClassStyle |= CS_DROPSHADOW;
-            cp.ExStyle |= WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+            cp.ExStyle |= WS_EX_TOOLWINDOW;
             return cp;
         }
     }
-    protected override void OnShown(EventArgs e)
-    { base.OnShown(e); BeginFadeIn(); _life.Restart(); _cursorWatch.Start(); Logger.Info("Tooltip shown"); }
 
-    public void SetText(string t) { _text = t ?? ""; RecalcSizeAndPlaceNearCursor(_anchorCursor); Invalidate(); Logger.Info($"Tooltip text set (len={_text.Length})"); }
-    public void BeginFadeIn() { _mode = AnimMode.FadeIn; _animStart = DateTime.Now; Opacity = 0.0; _animTimer.Start(); }
-    public void BeginFadeOut() { if (_mode == AnimMode.FadeOut) return; _mode = AnimMode.FadeOut; _animStart = DateTime.Now; _animTimer.Start(); Logger.Info("Tooltip fade-out started"); }
+    protected override void OnShown(EventArgs e)
+    {
+        base.OnShown(e);
+        RecalcSizeAndPlaceNearCursor(_anchorCursor);
+        BeginFadeIn();
+        _life.Restart();
+
+        _approachUntil = DateTime.Now.AddMilliseconds(2000);
+        _cursorWatch.Start();
+        Logger.Info("Tooltip shown");
+    }
+
+    public void SetText(string t)
+    {
+        _text = t ?? "";
+        _textBox.Text = _text;
+        RecalcSizeAndPlaceNearCursor(_anchorCursor);
+        Invalidate();
+        Logger.Info($"Tooltip text set (len={_text.Length})");
+    }
+
+    private void SwitchToTextBoxMode()
+    {
+        if (_useTextBox) return;
+        _useTextBox = true;
+        _cursorWatch.Stop();
+
+        _textBox.Text = _text;
+        _textBox.Enabled = true;
+        _textBox.Visible = true;
+        Controls.SetChildIndex(_textBox, 0);
+
+        _btnClose.Visible = true; // 텍스트 모드에서 닫기 버튼 표시
+
+        LayoutInner();
+        Invalidate();
+        Logger.Info("Tooltip switched to TextBox mode for text selection");
+    }
+
+    private void LayoutInner()
+    {
+        _textBox.Size = new Size(Width - Ui.Pad.Horizontal, Height - Ui.Pad.Vertical);
+        _textBox.Location = new Point(Ui.Pad.Left, Ui.Pad.Top);
+
+        if (_textBox.Visible)
+        {
+            using (GraphicsPath textBoxPath = RoundedRect(new Rectangle(0, 0, _textBox.Width, _textBox.Height), Ui.Corner - 2))
+                _textBox.Region = new Region(textBoxPath);
+        }
+
+        _btnClose.Location = new Point(Width - _btnClose.Width - 8, 8);
+        _btnClose.BringToFront();
+    }
+
+    public void BeginFadeIn()
+    {
+        _mode = AnimMode.FadeIn;
+        _animStart = DateTime.Now;
+        Opacity = 0.01;
+        _animTimer.Start();
+    }
+
+    public void BeginFadeOut()
+    {
+        if (_mode == AnimMode.FadeOut) return;
+        _mode = AnimMode.FadeOut;
+        _animStart = DateTime.Now;
+        _animTimer.Start();
+        Logger.Info("Tooltip fade-out started");
+    }
 
     private static double EaseOutCubic(double t) { t = 1 - t; return 1 - t * t * t; }
 
     private void RecalcSizeAndPlaceNearCursor(Point anchor)
     {
-        using (Graphics g = CreateGraphics())
+        Size size;
+        if (IsHandleCreated && Visible)
+        {
+            using (Graphics g = CreateGraphics())
+            {
+                Size proposed = new(Ui.MaxWidth, int.MaxValue);
+                var flags = TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix | TextFormatFlags.TextBoxControl | TextFormatFlags.NoPadding;
+                Size measured = TextRenderer.MeasureText(g, string.IsNullOrEmpty(_text) ? " " : _text, Ui.Font, proposed, flags);
+                size = new Size(Math.Max(240, measured.Width + Ui.Pad.Horizontal + 6),
+                                Math.Max(96, measured.Height + Ui.Pad.Vertical + 6));
+            }
+        }
+        else
         {
             Size proposed = new(Ui.MaxWidth, int.MaxValue);
-            var flags = TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix | TextFormatFlags.TextBoxControl | TextFormatFlags.NoPadding;
-            Size measured = TextRenderer.MeasureText(g, string.IsNullOrEmpty(_text) ? " " : _text, Ui.Font, proposed, flags);
-            int w = Math.Max(240, measured.Width + Ui.Pad.Horizontal + 6);
-            int h = Math.Max(96, measured.Height + Ui.Pad.Vertical + 6);
-            Size = new Size(w, h);
-
-            using (GraphicsPath gp = RoundedRect(new Rectangle(0, 0, w, h), Ui.Corner)) Region = new Region(gp);
-
-            Rectangle workArea = Screen.FromPoint(anchor).WorkingArea;
-            int x = anchor.X + SpawnOffset, y = anchor.Y + SpawnOffset;
-            if (x + w > workArea.Right) x = workArea.Right - w - SpawnOffset;
-            if (y + h > workArea.Bottom) y = workArea.Bottom - h - SpawnOffset;
-            if (x < workArea.Left) x = workArea.Left + SpawnOffset;
-            if (y < workArea.Top) y = workArea.Top + SpawnOffset;
-            Location = new Point(x, y);
+            Size measured = TextRenderer.MeasureText(string.IsNullOrEmpty(_text) ? " " : _text, Ui.Font, proposed,
+                              TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix | TextFormatFlags.TextBoxControl);
+            size = new Size(Math.Max(240, measured.Width + Ui.Pad.Horizontal + 6),
+                            Math.Max(96, measured.Height + Ui.Pad.Vertical + 6));
         }
+
+        Size = size;
+
+        using (GraphicsPath gp = RoundedRect(new Rectangle(0, 0, size.Width, size.Height), Ui.Corner))
+            Region = new Region(gp);
+
+        Rectangle workArea = Screen.FromPoint(anchor).WorkingArea;
+        int x = anchor.X + SpawnOffset, y = anchor.Y + SpawnOffset;
+        if (x + size.Width > workArea.Right) x = workArea.Right - size.Width - SpawnOffset;
+        if (y + size.Height > workArea.Bottom) y = workArea.Bottom - SpawnOffset;
+        if (x < workArea.Left) x = workArea.Left + SpawnOffset;
+        if (y < workArea.Top) y = workArea.Top + SpawnOffset;
+        Location = new Point(x, y);
+
+        LayoutInner();
     }
 
     protected override void OnPaint(PaintEventArgs e)
     {
         var g = e.Graphics;
-        g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
         var rect = new Rectangle(0, 0, Width - 1, Height - 1);
 
         using (var pathShadow1 = RoundedRect(new Rectangle(4, 6, rect.Width, rect.Height), Ui.Corner + 3))
@@ -229,8 +425,12 @@ public class PrettyTooltipForm : Form
         g.FillPath(lg, bgPath);
         using var border = new Pen(Ui.Border, 1f); g.DrawPath(border, bgPath);
 
-        var textRect = new Rectangle(Ui.Pad.Left, Ui.Pad.Top, Width - Ui.Pad.Horizontal, Height - Ui.Pad.Vertical);
-        TextRenderer.DrawText(g, _text, Ui.Font, textRect, Ui.Text, TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix | TextFormatFlags.TextBoxControl | TextFormatFlags.NoPadding);
+        if (!_useTextBox)
+        {
+            var textRect = new Rectangle(Ui.Pad.Left, Ui.Pad.Top, Width - Ui.Pad.Horizontal, Height - Ui.Pad.Vertical);
+            TextRenderer.DrawText(g, _text, Ui.Font, textRect, Ui.Text,
+                TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix | TextFormatFlags.TextBoxControl | TextFormatFlags.NoPadding);
+        }
     }
 
     private static GraphicsPath RoundedRect(Rectangle bounds, int radius)
@@ -238,16 +438,19 @@ public class PrettyTooltipForm : Form
         int d = radius * 2;
         var gp = new GraphicsPath();
         gp.StartFigure();
-        gp.AddArc(bounds.X, bounds.Y, d, d, 180, 90);
-        gp.AddArc(bounds.Right - d, bounds.Y, d, d, 270, 90);
-        gp.AddArc(bounds.Right - d, bounds.Bottom - d, d, d, 0, 90);
-        gp.AddArc(bounds.X, bounds.Bottom - d, d, d, 90, 90);
+
+        gp.AddArc(bounds.X, bounds.Y, d, d, 180f, 90f);                          // 좌상
+        gp.AddArc(bounds.Right - d, bounds.Y, d, d, 270f, 90f);                   // 우상
+        gp.AddArc(bounds.Right - d, bounds.Bottom - d, d, d, 0f, 90f);            // 우하
+        gp.AddArc(bounds.X, bounds.Bottom - d, d, d, 90f, 90f);                   // 좌하
+
         gp.CloseFigure();
         return gp;
     }
 }
 
 #endregion
+
 
 #region Config
 
@@ -277,23 +480,20 @@ public static class App
     private const string IpcWindowTitle = "ChatMouse_IPC_v1";
     private const int WM_COPYDATA = 0x004A;
 
-        // Config live state & watcher
-        private static AppConfig? _cfgCurrent;
-        public static AppConfig GetCurrentConfig() => _cfgCurrent ?? new AppConfig();
-        public static event Action<AppConfig>? ConfigChanged;
-        private static FileSystemWatcher? _cfgWatcher;
-        private static System.Threading.Timer? _cfgDebounce;
+    private static AppConfig? _cfgCurrent;
+    public static AppConfig GetCurrentConfig() => _cfgCurrent ?? new AppConfig();
+    public static event Action<AppConfig>? ConfigChanged;
+    private static FileSystemWatcher? _cfgWatcher;
+    private static System.Threading.Timer? _cfgDebounce;
 
     private static string GetBaseDirectory()
     {
-        // 실행 파일이 있는 디렉터리를 기준으로 사용
         if (!string.IsNullOrEmpty(Environment.ProcessPath))
         {
             string? dir = Path.GetDirectoryName(Environment.ProcessPath);
             if (!string.IsNullOrEmpty(dir))
                 return dir;
         }
-        // 폴백: AppContext.BaseDirectory 사용
         return AppContext.BaseDirectory;
     }
 
@@ -374,7 +574,13 @@ public static class App
             else
             {
                 Logger.Info("One-shot mode...");
-                _ = TriggerOnceAsync(GetCurrentConfig(), _httpGlobal!, CancellationToken.None, null, IntPtr.Zero);
+                EventHandler? idleHandler = null;
+                idleHandler = (s, e) =>
+                {
+                    WinFormsApp.Idle -= idleHandler!;
+                    _ = TriggerOnceAsync(GetCurrentConfig(), _httpGlobal!, CancellationToken.None, null, IntPtr.Zero);
+                };
+                WinFormsApp.Idle += idleHandler;
                 WinFormsApp.Run();
             }
         }
@@ -472,7 +678,6 @@ public static class App
             var miShow = new ToolStripMenuItem("Show ( " + (_cfg.hotkey) + " )");
             miShow.Click += (_, __) => TriggerWithHwnd(IntPtr.Zero);
 
-            // [★ 추가] Settings 메뉴
             var miSettings = new ToolStripMenuItem("Settings...");
             miSettings.Click += (_, __) => ShowSettingsDialog();
 
@@ -480,7 +685,7 @@ public static class App
             miExit.Click += (_, __) => ExitThread();
 
             menu.Items.Add(miShow);
-            menu.Items.Add(miSettings); // [★ 추가]
+            menu.Items.Add(miSettings);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(miExit);
 
@@ -490,8 +695,6 @@ public static class App
                 Text = "ChatMouse", Visible = true, ContextMenuStrip = menu
             };
             _tray.DoubleClick += (_, __) => TriggerWithHwnd(IntPtr.Zero);
-
-            // 트레이 아이콘은 실행 파일 아이콘을 그대로 사용 (csproj에서 img/icon.ico 지정)
 
             _hotkeyWnd = new HotkeyWindow();
             if (!TryRegisterHotkey(_hotkeyWnd, _cfg.hotkey))
@@ -507,11 +710,9 @@ public static class App
 
             _hotkeyWnd.HotkeyPressed += (_, hwndAtPress) => TriggerWithHwnd(hwndAtPress);
 
-            // 구독: 설정 변경 시 즉시 반영
             ConfigChanged += OnConfigChanged;
 
-            // first-run: show once
-            var oneShot = new Timer { Interval = 150 };
+            var oneShot = new Timer { Interval = 350 };
             oneShot.Tick += (_, __) =>
             {
                 try { oneShot.Stop(); oneShot.Dispose(); } catch { }
@@ -535,46 +736,38 @@ public static class App
             base.ExitThreadCore();
         }
 
-    private void OnConfigChanged(AppConfig newCfg)
-    {
-        try
+        private void OnConfigChanged(AppConfig newCfg)
         {
-            _uiCtx.Post(_ =>
+            try
             {
-                var oldHotkey = _cfg.hotkey;
-                _cfg = newCfg;
-                _http = App._httpGlobal!;
-
-                // 메뉴 텍스트 갱신
-                if (_tray.ContextMenuStrip?.Items.Count > 0 && _tray.ContextMenuStrip.Items[0] is ToolStripMenuItem miShow)
-                    miShow.Text = "Show ( " + _cfg.hotkey + " )";
-
-                // ✅ 핫키가 바뀐 경우에만 재등록
-                if (!string.Equals(oldHotkey, _cfg.hotkey, StringComparison.OrdinalIgnoreCase))
+                _uiCtx.Post(_ =>
                 {
-                    if (!TryRegisterHotkey(_hotkeyWnd, _cfg.hotkey))
+                    var oldHotkey = _cfg.hotkey;
+                    _cfg = newCfg;
+                    _http = App._httpGlobal!;
+
+                    if (_tray.ContextMenuStrip?.Items.Count > 0 && _tray.ContextMenuStrip.Items[0] is ToolStripMenuItem miShow)
+                        miShow.Text = "Show ( " + _cfg.hotkey + " )";
+
+                    if (!string.Equals(oldHotkey, _cfg.hotkey, StringComparison.OrdinalIgnoreCase))
                     {
-                        _tray.ShowBalloonTip(3000, "ChatMouse",
-                            $"Hotkey '{_cfg.hotkey}' 재등록 실패. 설정에서 다른 키 조합을 선택하세요.",
-                            ToolTipIcon.Warning);
+                        if (!TryRegisterHotkey(_hotkeyWnd, _cfg.hotkey))
+                        {
+                            _tray.ShowBalloonTip(3000, "ChatMouse", $"Hotkey '{_cfg.hotkey}' 재등록 실패. 설정에서 다른 키 조합을 선택하세요.", ToolTipIcon.Warning);
+                        }
+                        else
+                        {
+                            _tray.ShowBalloonTip(1200, "ChatMouse", $"핫키 변경됨: {_cfg.hotkey}", ToolTipIcon.Info);
+                        }
                     }
-                    else
-                    {
-                        _tray.ShowBalloonTip(1200, "ChatMouse", $"핫키 변경됨: {_cfg.hotkey}", ToolTipIcon.Info);
-                    }
-                }
-                // 같으면 재등록하지 않음 (중복 호출/경고 스팸 방지)
-
-            }, null);
+                }, null);
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn("OnConfigChanged handler error: " + ex.Message);
+            }
         }
-        catch (Exception ex)
-        {
-            Logger.Warn("OnConfigChanged handler error: " + ex.Message);
-        }
-    }
 
-
-        // [★ 추가] 설정창 호출 + 저장 처리
         private void ShowSettingsDialog()
         {
             try
@@ -583,7 +776,7 @@ public static class App
                 if (dlg.ShowDialog() == DialogResult.OK)
                 {
                     var newCfg = dlg.GetConfig();
-                    App.SaveConfig(newCfg); // 파일 저장 + 런타임 반영 + 이벤트 발행
+                    App.SaveConfig(newCfg);
                     _tray.ShowBalloonTip(1500, "ChatMouse", "설정이 저장되었습니다.", ToolTipIcon.Info);
                 }
             }
@@ -615,7 +808,6 @@ public static class App
         {
             if (m.Msg == WM_HOTKEY)
             {
-                // Capture current foreground hwnd *before* we do anything else
                 IntPtr hwnd = GetForegroundWindow();
                 HotkeyPressed?.Invoke(this, hwnd);
             }
@@ -627,7 +819,6 @@ public static class App
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
-
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
 
@@ -637,8 +828,6 @@ public static class App
     private static bool TryRegisterHotkey(HotkeyWindow wnd, string hotkey)
     {
         ParseHotkey(hotkey, out uint mods, out uint key);
-
-        // 먼저 해제 시도 (오류 무시)
         _ = UnregisterHotKey(wnd.Handle, HotkeyId);
 
         if (!RegisterHotKey(wnd.Handle, HotkeyId, mods, key))
@@ -646,20 +835,16 @@ public static class App
             int err = Marshal.GetLastWin32Error();
             string reason = err switch
             {
-                1409 => "이미 동일한 전역 핫키가 등록되어 있습니다 (ERROR_HOTKEY_ALREADY_REGISTERED). " +
-                        "다른 프로그램이 사용 중이거나, 같은 핫키를 중복 등록하려 했을 수 있습니다.",
-                87   => "잘못된 매개변수 (ERROR_INVALID_PARAMETER). 키 파싱 결과를 확인하세요.",
+                1409 => "이미 동일한 전역 핫키가 등록되어 있습니다 (ERROR_HOTKEY_ALREADY_REGISTERED).",
+                87   => "잘못된 매개변수 (ERROR_INVALID_PARAMETER).",
                 _    => $"Win32 오류 코드={err}"
             };
-
             Logger.Warn($"Hotkey '{hotkey}' register failed. {reason}");
             return false;
         }
-
         Logger.Info($"Hotkey '{hotkey}' registered successfully.");
         return true;
     }
-
 
     private static void ParseHotkey(string s, out uint mods, out uint key)
     {
@@ -706,32 +891,12 @@ public static class App
         await Task.Yield();
         Logger.Info($"TriggerOnceAsync begin (hwndAtPress=0x{hwndAtPress.ToInt64():X})");
 
-        // Wait until modifiers are released (prevents interfering with Ctrl+C probe etc.)
         await WaitForModifiersReleasedAsync(TimeSpan.FromMilliseconds(250));
 
         var tooltip = new PrettyTooltipForm("⏳ 선택 텍스트 확인 중…");
 
         var cts = CancellationTokenSource.CreateLinkedTokenSource(externalCt);
         tooltip.FormClosed += (_, __) => { try { cts.Cancel(); cts.Dispose(); } catch { } };
-
-        var anchor = Cursor.Position;
-
-        DateTime start = DateTime.Now;
-        var cancelWatch = new Timer { Interval = 30 };
-        cancelWatch.Tick += (s, e) =>
-        {
-            if (!tooltip.Visible) { cancelWatch.Stop(); return; }
-            if ((DateTime.Now - start).TotalMilliseconds < 3000) return;
-            var cur = Cursor.Position;
-            if (Math.Abs(cur.X - anchor.X) > 4 || Math.Abs(cur.Y - anchor.Y) > 4)
-            {
-                Logger.Info("Mouse moved → cancel tooltip");
-                cancelWatch.Stop();
-                try { cts.Cancel(); } catch { }
-                tooltip.BeginFadeOut();
-            }
-        };
-        cancelWatch.Start();
 
         tooltip.Shown += async (_, __) =>
         {
@@ -774,10 +939,10 @@ public static class App
         return new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(timeoutSeconds) };
     }
 
-private static AppConfig LoadConfig()
-{
-    if (!File.Exists(ConfigPath))
+    private static AppConfig LoadConfig()
     {
+        if (!File.Exists(ConfigPath))
+        {
             var sample = new AppConfig
             {
                 base_url = "http://127.0.0.1:8000/v1",
@@ -791,35 +956,30 @@ private static AppConfig LoadConfig()
                 hotkey = "Ctrl+Shift+Space",
                 request_timeout_seconds = 10
             };
-        string json = JsonSerializer.Serialize(sample, JsonOpts);
-        File.WriteAllText(ConfigPath, json, new UTF8Encoding(false));
-        Logger.Info("config.json created with defaults");
-        return sample;
+            string json = JsonSerializer.Serialize(sample, JsonOpts);
+            File.WriteAllText(ConfigPath, json, new UTF8Encoding(false));
+            Logger.Info("config.json created with defaults");
+            return sample;
+        }
+
+        string raw = File.ReadAllText(ConfigPath, Encoding.UTF8);
+        var cfg = JsonSerializer.Deserialize<AppConfig>(raw, JsonOpts) ?? new AppConfig();
+
+        bool changed = false;
+
+        if (string.IsNullOrWhiteSpace(cfg.base_url)) { cfg.base_url = "http://127.0.0.1:8000/v1"; changed = true; }
+        if (string.IsNullOrWhiteSpace(cfg.api_key)) { cfg.api_key = "EMPTY"; changed = true; }
+        if (string.IsNullOrWhiteSpace(cfg.model))   { cfg.model = "my-vllm-model"; changed = true; }
+        if (string.IsNullOrWhiteSpace(cfg.prompt))  { cfg.prompt = "다음 텍스트를 요약해줘:"; changed = true; }
+        if (string.IsNullOrWhiteSpace(cfg.hotkey))  { cfg.hotkey = "Ctrl+Shift+Space"; changed = true; }
+        if (cfg.request_timeout_seconds <= 0) { cfg.request_timeout_seconds = 10; changed = true; }
+        if (!raw.Contains("\"tray_mode\"")) { cfg.tray_mode = true; changed = true; }
+
+        if (changed)
+            File.WriteAllText(ConfigPath, JsonSerializer.Serialize(cfg, JsonOpts), new UTF8Encoding(false));
+
+        return cfg;
     }
-
-    string raw = File.ReadAllText(ConfigPath, Encoding.UTF8);
-    var cfg = JsonSerializer.Deserialize<AppConfig>(raw, JsonOpts) ?? new AppConfig();
-
-    bool changed = false;
-
-    // 부족한 필드만 보정
-    if (string.IsNullOrWhiteSpace(cfg.base_url)) { cfg.base_url = "http://127.0.0.1:8000/v1"; changed = true; }
-    if (string.IsNullOrWhiteSpace(cfg.api_key)) { cfg.api_key = "EMPTY"; changed = true; }
-    if (string.IsNullOrWhiteSpace(cfg.model))   { cfg.model = "my-vllm-model"; changed = true; }
-    if (string.IsNullOrWhiteSpace(cfg.prompt))  { cfg.prompt = "다음 텍스트를 요약해줘:"; changed = true; }
-    if (string.IsNullOrWhiteSpace(cfg.hotkey))  { cfg.hotkey = "Ctrl+Shift+Space"; changed = true; }
-    if (cfg.request_timeout_seconds <= 0) { cfg.request_timeout_seconds = 10; changed = true; }
-
-    // 과거 파일 호환: 키 자체가 없던 경우에만 true로 보정
-    if (!raw.Contains("\"tray_mode\"")) { cfg.tray_mode = true; changed = true; }
-
-    if (changed)
-        File.WriteAllText(ConfigPath, JsonSerializer.Serialize(cfg, JsonOpts), new UTF8Encoding(false));
-
-    return cfg;
-}
-
-
 
     private static void StartConfigWatcher()
     {
@@ -864,7 +1024,7 @@ private static AppConfig LoadConfig()
         var newCfg = LoadConfig();
         Logger.Info($"Using config path: {ConfigPath}");
         _cfgCurrent = newCfg;
-        Logger.Info($"Config loaded. tray_mode={newCfg.tray_mode}, hotkey={newCfg.hotkey}, base_url={newCfg.base_url}, model={newCfg.model}, proxy={(newCfg.http_proxy ?? "null")}, ssl_off={newCfg.disable_ssl_verify}");        // HTTP 재생성 (프록시/SSL 옵션 반영)
+        Logger.Info($"Config loaded. tray_mode={newCfg.tray_mode}, hotkey={newCfg.hotkey}, base_url={newCfg.base_url}, model={newCfg.model}, proxy={(newCfg.http_proxy ?? "null")}, ssl_off={newCfg.disable_ssl_verify}");
         try
         {
             var old = _httpGlobal;
@@ -877,8 +1037,7 @@ private static AppConfig LoadConfig()
         try { ConfigChanged?.Invoke(newCfg); } catch { }
     }
 
-    // [★ 추가] 수동 저장 API: 파일 저장 + 런타임 반영 + 이벤트 발행
-    private static readonly object _cfgSaveLock = new(); // 저장 동시성 보호
+    private static readonly object _cfgSaveLock = new();
 
     public static void SaveConfig(AppConfig cfg)
     {
@@ -889,7 +1048,6 @@ private static AppConfig LoadConfig()
                 File.WriteAllText(ConfigPath, JsonSerializer.Serialize(cfg, JsonOpts), new UTF8Encoding(false));
                 _cfgCurrent = cfg;
 
-                // HTTP 재생성 (프록시/SSL 옵션 반영)
                 try
                 {
                     var old = _httpGlobal;
@@ -982,7 +1140,6 @@ private static AppConfig LoadConfig()
         public RECT rcCaret;
     }
 
-    // SendInput
     [StructLayout(LayoutKind.Sequential)] private struct INPUT { public uint type; public InputUnion U; }
     [StructLayout(LayoutKind.Explicit)]
     private struct InputUnion
@@ -1030,10 +1187,8 @@ private static AppConfig LoadConfig()
 
     private static async Task<string?> GetContextTextPreferSelectionAsync(AppConfig cfg, CancellationToken outerCt, IntPtr hwndAtPress)
     {
-        // 0) If we got hwnd from hotkey moment, prefer using it
         IntPtr targetHwnd = hwndAtPress != IntPtr.Zero ? hwndAtPress : GetForegroundWindow();
 
-        // 1) UIA3 selection via saved hwnd → focused element
         try
         {
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(outerCt);
@@ -1043,10 +1198,9 @@ private static AppConfig LoadConfig()
                 try
                 {
                     using var automation = new UIA3Automation();
-                    var element = automation.FocusedElement(); // After hotkey, focus may still be correct
+                    var element = automation.FocusedElement();
                     if (element == null || targetHwnd != IntPtr.Zero)
                     {
-                        // Try from saved hwnd
                         try
                         {
                             var fromHwnd = automation.FromHandle(targetHwnd);
@@ -1083,7 +1237,6 @@ private static AppConfig LoadConfig()
         catch (OperationCanceledException) when (outerCt.IsCancellationRequested) { throw; }
         catch (Exception ex) { Logger.Warn("FlaUI stage exception: " + ex.Message); }
 
-        // 2) Win32 Edit/RichEdit
         try
         {
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(outerCt);
@@ -1125,7 +1278,6 @@ private static AppConfig LoadConfig()
         catch (OperationCanceledException) when (outerCt.IsCancellationRequested) { throw; }
         catch (Exception ex) { Logger.Warn("Win32 stage exception: " + ex.Message); }
 
-        // 3) Ctrl+C Probe (restore focus to saved hwnd)
         if (cfg.allow_clipboard_probe)
         {
             try
@@ -1140,10 +1292,10 @@ private static AppConfig LoadConfig()
                     try
                     {
                         if (targetHwnd != IntPtr.Zero) SetForegroundWindow(targetHwnd);
-                        Thread.Sleep(80); // allow activation
+                        Thread.Sleep(80);
 
                         SendCtrlC();
-                        Thread.Sleep(140); // let clipboard update
+                        Thread.Sleep(140);
                         if (Clipboard.ContainsText())
                         {
                             string captured = Clipboard.GetText(TextDataFormat.UnicodeText);
@@ -1164,7 +1316,6 @@ private static AppConfig LoadConfig()
             catch (Exception ex) { Logger.Warn("Probe stage exception: " + ex.Message); }
         }
 
-        // 4) Clipboard fallback
         try
         {
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(outerCt);
@@ -1239,7 +1390,7 @@ private static AppConfig LoadConfig()
 #endregion
 
 // ===============================
-// [★ 추가] 설정창 UI (ConfigForm)
+// Settings UI (ConfigForm)
 // ===============================
 #region Settings UI
 
@@ -1306,7 +1457,6 @@ public class ConfigForm : Form
         Controls.Add(layout);
         Controls.Add(btnPanel);
 
-        // 초기값 바인딩
         tbBaseUrl.Text = cfg.base_url;
         tbApiKey.Text = cfg.api_key;
         tbModel.Text = cfg.model;
@@ -1318,7 +1468,6 @@ public class ConfigForm : Form
         cbTrayMode.Checked = cfg.tray_mode;
         cbSslOff.Checked = cfg.disable_ssl_verify;
 
-        // OK 클릭 시 종료(값은 호출자가 GetConfig로 수집)
         btnOk.Click += (_, __) => { DialogResult = DialogResult.OK; Close(); };
         btnCancel.Click += (_, __) => { DialogResult = DialogResult.Cancel; Close(); };
     }
