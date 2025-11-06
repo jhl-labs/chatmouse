@@ -1,22 +1,14 @@
-// Program.cs - ChatMouse (single-instance, tray, hotkey, FlaUI selection, IPC with WM_COPYDATA)
-// Features:
-//  - Tooltip with fade, selectable Text mode (+ close button)
-//  - CRLF newline normalization for consistent wrapping
-//  - Busy/Sticky: LLM 요청 중 자동 닫힘 방지 + 결과 표시 고정 시간
-//  - Per-request timeout (config.request_timeout_seconds 사용) + 명확한 타임아웃 메시지
-//  - Config in %USERPROFILE%\.chatmouse\config.json
-//  - Multiple prompts (1..9) with INDIVIDUAL GLOBAL HOTKEYS per prompt (no in-tooltip keys)
-//  - Settings UI to edit 1..9 prompts + their hotkeys (넉넉한 크기)
-//  - Robust hotkey parsing (NumPad/locale symbols) + duplicate detection
-//  - On settings change, fully unregister ALL known hotkey IDs before re-registering
-//  - One toast summary after hotkey registration (not per hotkey)
-//  - ✅ Update checker: GitHub releases on startup + tray menu "Check for updates…"
-//
-// Hotkey focus stability:
-//  - Capture foreground HWND at hotkey moment and pass it down.
-//  - Wait modifiers to be released.
-//  - Optionally SetForegroundWindow(savedHwnd) before Ctrl+C probe.
-//  - Hidden hotkey window uses WS_EX_NOACTIVATE so focus is not stolen.
+// Program.cs - ChatMouse
+// - Single-instance (WM_COPYDATA IPC)
+// - Tooltip with fade, selectable Text mode, close button
+// - CRLF normalization for consistent wrapping
+// - Config in %USERPROFILE%\.chatmouse\config.json
+// - Multiple prompts (1..9) with INDIVIDUAL GLOBAL HOTKEYS per prompt
+// - Settings: Tabbed UI (General / Prompts & Hotkeys / LLM / Network / Updates)
+// - Hotkey: robust parsing, unregister/re-register all on settings change, one toast summary
+// - Tooltip lifetime configurable; error auto-hide but NOT during active LLM request
+// - LLM call: detailed logging of request when error (URL, token first 10 chars, model, headers, prompts)
+// - Update checker (GitHub) with env override & .env support
 
 #region Using
 
@@ -59,7 +51,7 @@ static class Ui
 {
     public const int Corner = 12;
     public static readonly Padding Pad = new Padding(16, 12, 16, 14);
-    public const int MaxWidth = 640; // 넉넉히
+    public const int MaxWidth = 900;
     public const float TargetOpacity = 0.97f;
     public static readonly Font Font = new Font("Segoe UI", 11f, FontStyle.Regular);
     public static readonly Color BgTop = Color.FromArgb(242, 30, 30, 30);
@@ -129,6 +121,9 @@ public class PrettyTooltipForm : Form
     private string _text;
     private readonly Timer _animTimer = new() { Interval = 16 };
     private readonly Timer _cursorWatch = new() { Interval = 30 };
+    private readonly Timer _errorAutoClose = new() { Interval = 1000 };
+    private int _errorRemainMs = 0;
+
     private readonly TextBox _textBox;
     private readonly Button _btnClose;
 
@@ -142,7 +137,7 @@ public class PrettyTooltipForm : Form
     private const int SpawnOffset = 12;
 
     private readonly Stopwatch _life = new();
-    private const int GraceMs = 3000;
+    private int _graceMs = 3000;
     private bool _isMouseOver = false;
     private bool _useTextBox = false;
 
@@ -151,14 +146,19 @@ public class PrettyTooltipForm : Form
     private DateTime? _awaySince = null;
     private const int MaxIdleMsWithoutApproach = 8000;
 
-    // Busy/Sticky 상태
-    private bool _busy = false;
-    private DateTime _stickyUntil = DateTime.MinValue;
+    private bool _llmInFlight = false;
 
-    public PrettyTooltipForm(string initialText)
+        // DPI-aware layout fields
+        private Padding _pad;
+        private int _corner;
+        private float _dpiScale = 1f;
+
+    public PrettyTooltipForm(string initialText, int stayMs, Point? anchorOverride = null)
     {
         _textRaw = initialText ?? "";
         _text = NormalizeNewlines(_textRaw);
+
+        _graceMs = Math.Max(1500, stayMs);
 
         FormBorderStyle = FormBorderStyle.None;
         StartPosition = FormStartPosition.Manual;
@@ -167,6 +167,17 @@ public class PrettyTooltipForm : Form
         DoubleBuffered = true;
         BackColor = Color.FromArgb(24, 24, 24);
         Opacity = 0.0;
+
+                // DPI-aware scaling for this tooltip window
+                AutoScaleMode = AutoScaleMode.Dpi;
+                try { _dpiScale = DeviceDpi / 96f; } catch { _dpiScale = 1f; }
+                _corner = (int)Math.Round(Ui.Corner * _dpiScale);
+                _pad = new Padding(
+                    (int)Math.Round(Ui.Pad.Left * _dpiScale),
+                    (int)Math.Round(Ui.Pad.Top * _dpiScale),
+                    (int)Math.Round(Ui.Pad.Right * _dpiScale),
+                    (int)Math.Round(Ui.Pad.Bottom * _dpiScale)
+                );
 
         SetStyle(ControlStyles.AllPaintingInWmPaint |
                  ControlStyles.OptimizedDoubleBuffer |
@@ -212,12 +223,7 @@ public class PrettyTooltipForm : Form
         Controls.Add(_btnClose);
 
         MouseEnter += (s, e) => { _isMouseOver = true; _hasApproached = true; _cursorWatch.Stop(); };
-        MouseLeave += (s, e) =>
-        {
-            _isMouseOver = false;
-            if (_busy) return; // 요청 중에는 자동 닫힘 감시 중지
-            if (_life.ElapsedMilliseconds >= GraceMs && !_useTextBox) _cursorWatch.Start();
-        };
+        MouseLeave += (s, e) => { _isMouseOver = false; if (_life.ElapsedMilliseconds >= _graceMs && !_useTextBox && !_llmInFlight) _cursorWatch.Start(); };
         MouseClick += (s, e) =>
         {
             if (!_useTextBox && _isMouseOver)
@@ -250,13 +256,12 @@ public class PrettyTooltipForm : Form
 
         _cursorWatch.Tick += (s, e) =>
         {
-            if (_busy) return; // 요청중이면 닫지 않음
-            if (DateTime.Now < _stickyUntil) return; // 결과 고정 시간
             if (DateTime.Now < _approachUntil) return;
+            if (_llmInFlight) return; // 요청 중엔 사라지지 않음
 
             if (!_hasApproached)
             {
-                if (_life.ElapsedMilliseconds >= MaxIdleMsWithoutApproach)
+                if (_life.ElapsedMilliseconds >= Math.Max(MaxIdleMsWithoutApproach, _graceMs))
                 {
                     _cursorWatch.Stop(); BeginFadeOut();
                 }
@@ -274,8 +279,33 @@ public class PrettyTooltipForm : Form
             }
         };
 
-        _anchorCursor = Cursor.Position;
+        _errorAutoClose.Tick += (_, __) =>
+        {
+            if (_errorRemainMs <= 0)
+            {
+                _errorAutoClose.Stop();
+                if (!_llmInFlight) BeginFadeOut();
+                return;
+            }
+            _errorRemainMs -= _errorAutoClose.Interval;
+        };
+
+        _anchorCursor = anchorOverride ?? Cursor.Position;
         RecalcSizeAndPlaceNearCursor(_anchorCursor);
+    }
+
+    public void MarkLlmInFlight(bool inFlight)
+    {
+        _llmInFlight = inFlight;
+        if (inFlight)
+        {
+            _cursorWatch.Stop();
+        }
+        else
+        {
+            _approachUntil = DateTime.Now.AddMilliseconds(1200);
+            _cursorWatch.Start();
+        }
     }
 
     protected override bool ShowWithoutActivation => true;
@@ -314,6 +344,15 @@ public class PrettyTooltipForm : Form
         Logger.Info($"Tooltip text set (len={_text.Length})");
     }
 
+    public void ShowErrorThenAutoClose(string errorText, int autoCloseMs)
+    {
+        SetText(errorText);
+        _llmInFlight = false;
+        _errorRemainMs = Math.Max(1500, autoCloseMs);
+        _errorAutoClose.Stop();
+        _errorAutoClose.Start();
+    }
+
     public void SwitchToTextBoxMode()
     {
         if (_useTextBox) return;
@@ -334,8 +373,8 @@ public class PrettyTooltipForm : Form
 
     private void LayoutInner()
     {
-        _textBox.Size = new Size(Width - Ui.Pad.Horizontal, Height - Ui.Pad.Vertical);
-        _textBox.Location = new Point(Ui.Pad.Left, Ui.Pad.Top);
+        _textBox.Size = new Size(Width - _pad.Horizontal, Height - _pad.Vertical);
+        _textBox.Location = new Point(_pad.Left, _pad.Top);
         using var textBoxPath = new GraphicsPath();
         textBoxPath.AddRectangle(new Rectangle(0, 0, _textBox.Width, _textBox.Height));
         _textBox.Region = new Region(textBoxPath);
@@ -355,33 +394,10 @@ public class PrettyTooltipForm : Form
     public void BeginFadeOut()
     {
         if (_mode == AnimMode.FadeOut) return;
-        if (_busy) return; // 요청중엔 닫기 금지
-        if (DateTime.Now < _stickyUntil) return; // 결과 고정 중엔 닫기 금지
         _mode = AnimMode.FadeOut;
         _animStart = DateTime.Now;
         _animTimer.Start();
         Logger.Info("Tooltip fade-out started");
-    }
-
-    public void SetBusy(bool busy)
-    {
-        _busy = busy;
-        if (busy)
-        {
-            _cursorWatch.Stop();
-        }
-        else
-        {
-            if (!_useTextBox) _cursorWatch.Start();
-        }
-    }
-
-    /// <summary>지정 시간(ms) 동안 자동 닫힘을 막아 결과를 읽을 시간을 준다.</summary>
-    public void StickFor(int milliseconds)
-    {
-        if (milliseconds <= 0) return;
-        var until = DateTime.Now.AddMilliseconds(milliseconds);
-        if (until > _stickyUntil) _stickyUntil = until;
     }
 
     private static double EaseOutCubic(double t) { t = 1 - t; return 1 - t * t * t; }
@@ -396,8 +412,8 @@ public class PrettyTooltipForm : Form
                 Size proposed = new(Ui.MaxWidth, int.MaxValue);
                 var flags = TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix | TextFormatFlags.TextBoxControl | TextFormatFlags.NoPadding;
                 Size measured = TextRenderer.MeasureText(g, string.IsNullOrEmpty(_text) ? " " : _text, Ui.Font, proposed, flags);
-                size = new Size(Math.Max(360, measured.Width + Ui.Pad.Horizontal + 6),
-                                Math.Max(160, measured.Height + Ui.Pad.Vertical + 6));
+                size = new Size(Math.Max(240, measured.Width + Ui.Pad.Horizontal + 6),
+                                Math.Max(120, measured.Height + Ui.Pad.Vertical + 6));
             }
         }
         else
@@ -405,8 +421,8 @@ public class PrettyTooltipForm : Form
             Size proposed = new(Ui.MaxWidth, int.MaxValue);
             Size measured = TextRenderer.MeasureText(string.IsNullOrEmpty(_text) ? " " : _text, Ui.Font, proposed,
                               TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix | TextFormatFlags.TextBoxControl);
-            size = new Size(Math.Max(360, measured.Width + Ui.Pad.Horizontal + 6),
-                            Math.Max(160, measured.Height + Ui.Pad.Vertical + 6));
+            size = new Size(Math.Max(240, measured.Width + Ui.Pad.Horizontal + 6),
+                            Math.Max(120, measured.Height + Ui.Pad.Vertical + 6));
         }
 
         Size = size;
@@ -420,9 +436,16 @@ public class PrettyTooltipForm : Form
         if (y + size.Height > workArea.Bottom) y = workArea.Bottom - SpawnOffset;
         if (x < workArea.Left) x = workArea.Left + SpawnOffset;
         if (y < workArea.Top) y = workArea.Top + SpawnOffset;
-        Location = new Point(x, y);
+        var final = new Point(x, y);
+        Location = final;
 
         LayoutInner();
+
+        try
+        {
+            Logger.Info($"Tooltip placed: anchor=({anchor.X},{anchor.Y}), workArea=({workArea.Left},{workArea.Top},{workArea.Right},{workArea.Bottom}), size=({size.Width}x{size.Height}), final=({final.X},{final.Y})");
+        }
+        catch { }
     }
 
     protected override void OnPaint(PaintEventArgs e)
@@ -488,11 +511,17 @@ public class AppConfig
     public string? http_proxy { get; set; }
     public bool disable_ssl_verify { get; set; } = false;
 
-    public bool tray_mode { get; set; } = false;
+    public bool tray_mode { get; set; } = true;
     public string hotkey { get; set; } = "Ctrl+Shift+Space";
     public int request_timeout_seconds { get; set; } = 10;
 
-    // Update checker config
+    public int tooltip_stay_ms { get; set; } = 6000;  // 일반 유지시간
+    public int tooltip_error_ms { get; set; } = 3500; // 에러 표시 후 자동 닫힘
+
+    // LLM custom headers: "Header: Value" per line in UI
+    public string[] llm_custom_headers { get; set; } = Array.Empty<string>();
+
+    // ===== Update checker config =====
     public bool update_check_enabled { get; set; } = true;
     public string update_repo_owner { get; set; } = "qmoix";
     public string update_repo_name { get; set; } = "chatmouse";
@@ -541,9 +570,13 @@ public static class App
     public static void Main()
     {
         Logger.Init();
+        try { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2); Logger.Info("DPI awareness: PerMonitorV2 set"); } catch { Logger.Warn("Failed to set PerMonitorV2 DPI awareness (continuing)"); }
         Mutex? mutex = null;
         try
         {
+            // Load .env if exists (to populate Environment for this process)
+            TryLoadDotEnv();
+
             bool isOwner;
             mutex = new Mutex(true, MutexName, out isOwner);
             if (!isOwner)
@@ -573,9 +606,9 @@ public static class App
                 else Logger.Error("UnhandledException: " + e.ExceptionObject?.ToString());
             };
 
-            var cfg = LoadConfig();
+            var cfg = LoadConfigWithEnvOverrides();
             _cfgCurrent = cfg;
-            Logger.Info($"Config loaded. tray_mode={cfg.tray_mode}, hotkey={cfg.hotkey}, base_url={cfg.base_url}, model={cfg.model}, proxy={(cfg.http_proxy ?? "null")}, ssl_off={cfg.disable_ssl_verify}");
+            Logger.Info($"Config loaded. tray_mode={cfg.tray_mode}, hotkey={cfg.hotkey}, base_url={cfg.base_url}, model={cfg.model}, proxy={(cfg.http_proxy ?? "null")}, ssl_off={cfg.disable_ssl_verify}, tooltip_stay_ms={cfg.tooltip_stay_ms}, tooltip_error_ms={cfg.tooltip_error_ms}");
 
             _httpGlobal = CreateHttp(cfg);
             StartConfigWatcher();
@@ -593,7 +626,7 @@ public static class App
                 catch (Exception ex) { Logger.Error(ex, "IPC Trigger failed"); }
             };
 
-            // 🔔 Check update on startup (fire-and-forget)
+            // Update check on startup
             if (cfg.update_check_enabled)
             {
                 _ = Task.Run(async () =>
@@ -633,6 +666,31 @@ public static class App
             try { mutex?.ReleaseMutex(); } catch { }
             Logger.Close();
         }
+    }
+
+    private static void TryLoadDotEnv()
+    {
+        try
+        {
+            string dir = GetConfigDirectory();
+            string envPath1 = Path.Combine(dir, ".env");
+            string envPath2 = Path.Combine(AppContext.BaseDirectory, ".env");
+            string path = File.Exists(envPath1) ? envPath1 : (File.Exists(envPath2) ? envPath2 : "");
+            if (string.IsNullOrEmpty(path)) return;
+
+            foreach (var line in File.ReadAllLines(path))
+            {
+                var s = line.Trim();
+                if (s.Length == 0 || s.StartsWith("#")) continue;
+                int eq = s.IndexOf('=');
+                if (eq <= 0) continue;
+                string key = s.Substring(0, eq).Trim();
+                string val = s.Substring(eq + 1).Trim().Trim('"');
+                Environment.SetEnvironmentVariable(key, val, EnvironmentVariableTarget.Process);
+            }
+            Logger.Info(".env loaded");
+        }
+        catch (Exception ex) { Logger.Warn(".env load failed: " + ex.Message); }
     }
 
     #region IPC
@@ -780,19 +838,17 @@ public static class App
 
             ConfigChanged += OnConfigChanged;
 
-            var oneShot = new Timer { Interval = 350 };
-            oneShot.Tick += (_, __) =>
-            {
-                try { oneShot.Stop(); oneShot.Dispose(); } catch { }
-                TriggerWithHwnd(GetForegroundWindow(), forcedPrompt: null);
-            };
-            oneShot.Start();
+            // Removed auto-trigger on tray startup: do not show LLM tooltip immediately when starting in tray mode.
+            // Original behavior used a one-shot timer to call TriggerWithHwnd shortly after startup.
+            // This is intentionally disabled to honor the requirement that tray mode should be silent on launch.
         }
 
         private void TriggerWithHwnd(IntPtr hwndAtPress, string? forcedPrompt)
         {
             Logger.Info($"Trigger from tray/hotkey (hwnd=0x{hwndAtPress.ToInt64():X}, forcedPrompt={(forcedPrompt!=null ? "Y" : "N")})");
-            _ = TriggerOnceAsync(GetCurrentConfig(), App._httpGlobal!, CancellationToken.None, null, hwndAtPress, forcedPrompt: forcedPrompt);
+            var http = App._httpGlobal ?? App.CreateHttp(_cfg);
+            _http = http;
+            _ = TriggerOnceAsync(GetCurrentConfig(), http, CancellationToken.None, null, hwndAtPress, forcedPrompt: forcedPrompt);
         }
 
         protected override void ExitThreadCore()
@@ -811,14 +867,62 @@ public static class App
             {
                 _uiCtx.Post(_ =>
                 {
+                    // Decide whether hotkey re-registration is actually needed
+                    string oldMain = _cfg.hotkey ?? string.Empty;
+                    string newMain = newCfg.hotkey ?? string.Empty;
+
+                    bool TryNorm(string s, out string norm)
+                    {
+                        norm = string.Empty;
+                        if (string.IsNullOrWhiteSpace(s)) return false;
+                        string n;
+                        uint m, k;
+                        if (TryNormalizeCombo(s, out n, out m, out k)) { norm = n; return true; }
+                        return false;
+                    }
+
+                    bool mainChanged = true;
+                    if (TryNorm(oldMain, out var normOldMain) && TryNorm(newMain, out var normNewMain))
+                        mainChanged = !string.Equals(normOldMain, normNewMain, StringComparison.OrdinalIgnoreCase);
+                    else
+                        mainChanged = !string.Equals(oldMain?.Trim(), newMain?.Trim(), StringComparison.OrdinalIgnoreCase);
+
+                    string[] oldPh = NormalizePromptHotkeys(_cfg);
+                    string[] newPh = NormalizePromptHotkeys(newCfg);
+                    bool promptsChanged = false;
+                    for (int i = 0; i < 9; i++)
+                    {
+                        string a = oldPh[i] ?? string.Empty;
+                        string b = newPh[i] ?? string.Empty;
+                        if (string.IsNullOrWhiteSpace(a) && string.IsNullOrWhiteSpace(b)) continue;
+                        bool hasA = TryNorm(a, out var na);
+                        bool hasB = TryNorm(b, out var nb);
+                        if (hasA && hasB)
+                        {
+                            if (!string.Equals(na, nb, StringComparison.OrdinalIgnoreCase)) { promptsChanged = true; break; }
+                        }
+                        else if (!string.Equals(a.Trim(), b.Trim(), StringComparison.OrdinalIgnoreCase)) { promptsChanged = true; break; }
+                    }
+
+                    bool hotkeysChanged = mainChanged || promptsChanged;
+
+                    // Adopt new config and HttpClient regardless
                     _cfg = newCfg;
-                    _http = App._httpGlobal!;
+                    _http = App._httpGlobal ?? App.CreateHttp(newCfg);
 
                     if (_miShow != null)
                         _miShow.Text = "Show ( " + _cfg.hotkey + " )";
 
-                    UnregisterAllHotkeys();
-                    RegisterAllHotkeys(_cfg, showSummaryToast: true);
+                    if (hotkeysChanged)
+                    {
+                        UnregisterAllHotkeys();
+                        RegisterAllHotkeys(_cfg, showSummaryToast: true);
+                    }
+                    else
+                    {
+                        // Do not re-register when hotkeys are unchanged (prevents spurious 1408 errors and noisy toast)
+                        Logger.Info("ConfigChanged: LLM/settings updated without hotkey changes — keeping existing hotkey registrations.");
+                    }
                 }, null);
             }
             catch (Exception ex)
@@ -845,7 +949,23 @@ public static class App
             }
         }
 
+        // ===== Strong UI-thread marshalling for hotkeys =====
         private void RegisterAllHotkeys(AppConfig cfg, bool showSummaryToast)
+        {
+            if (SynchronizationContext.Current == _uiCtx)
+                RegisterAllHotkeys_UI(cfg, showSummaryToast);
+            else
+                _uiCtx.Send(_ => RegisterAllHotkeys_UI(cfg, showSummaryToast), null);
+        }
+        private void UnregisterAllHotkeys()
+        {
+            if (SynchronizationContext.Current == _uiCtx)
+                UnregisterAllHotkeys_UI();
+            else
+                _uiCtx.Send(_ => UnregisterAllHotkeys_UI(), null);
+        }
+
+        private void RegisterAllHotkeys_UI(AppConfig cfg, bool showSummaryToast)
         {
             _normalizedCombos.Clear();
 
@@ -880,6 +1000,21 @@ public static class App
             }
         }
 
+        private void UnregisterAllHotkeys_UI()
+        {
+            try { UnregisterHotKey(_hotkeyWnd.Handle, HotkeyMainId); } catch { }
+            for (int i = 0; i < 9; i++)
+            {
+                try { UnregisterHotKey(_hotkeyWnd.Handle, HotkeyPromptBaseId + i); } catch { }
+            }
+            foreach (var id in _registeredIds.ToArray())
+            {
+                try { UnregisterHotKey(_hotkeyWnd.Handle, id); } catch { }
+                _registeredIds.Remove(id);
+            }
+            _normalizedCombos.Clear();
+        }
+
         private bool TryRegisterComboUnique(int id, string hotkey, out string normalized, out string error)
         {
             normalized = "";
@@ -898,33 +1033,53 @@ public static class App
                 return false;
             }
 
-            _ = UnregisterHotKey(_hotkeyWnd.Handle, id);
+            // ensure unregister on UI thread
+            _uiCtx.Send(_ => { try { UnregisterHotKey(_hotkeyWnd.Handle, id); } catch { } }, null);
+
+            bool ok = false;
+            int winErr = 0;
+
+            // first try (we're on UI thread here)
             if (!RegisterHotKey(_hotkeyWnd.Handle, id, mods, key))
             {
-                int err = Marshal.GetLastWin32Error();
-                error = "win32-" + err;
-                Logger.Warn($"RegisterHotKey failed ({err}) for '{hotkey}' (mods=0x{mods:X}, key=0x{key:X})");
+                winErr = Marshal.GetLastWin32Error();
+
+                if (winErr == 1408) // ERROR_WINDOW_OF_OTHER_THREAD
+                {
+                    // re-try on UI thread explicitly
+                    _uiCtx.Send(_ =>
+                    {
+                        if (!RegisterHotKey(_hotkeyWnd.Handle, id, mods, key))
+                        {
+                            winErr = Marshal.GetLastWin32Error();
+                            ok = false;
+                        }
+                        else ok = true;
+                    }, null);
+                }
+                else if (winErr == 1409) // already registered by other app / reserved
+                {
+                    error = "already-registered-or-reserved";
+                    return false;
+                }
+                else
+                {
+                    error = "win32-" + winErr;
+                    return false;
+                }
+            }
+            else ok = true;
+
+            if (!ok)
+            {
+                error = winErr == 1408 ? "other-thread-hwnd" : "win32-" + winErr;
+                Logger.Warn($"RegisterHotKey failed ({winErr}) for '{hotkey}'");
                 return false;
             }
 
             _registeredIds.Add(id);
             _normalizedCombos.Add(norm);
             return true;
-        }
-
-        private void UnregisterAllHotkeys()
-        {
-            try { UnregisterHotKey(_hotkeyWnd.Handle, HotkeyMainId); } catch { }
-            for (int i = 0; i < 9; i++)
-            {
-                try { UnregisterHotKey(_hotkeyWnd.Handle, HotkeyPromptBaseId + i); } catch { }
-            }
-            foreach (var id in _registeredIds.ToArray())
-            {
-                try { UnregisterHotKey(_hotkeyWnd.Handle, id); } catch { }
-                _registeredIds.Remove(id);
-            }
-            _normalizedCombos.Clear();
         }
 
         // ===== Manual update check entry point =====
@@ -1108,7 +1263,8 @@ public static class App
 
         await WaitForModifiersReleasedAsync(TimeSpan.FromMilliseconds(250));
 
-        var tooltip = new PrettyTooltipForm("⏳ 선택 텍스트 확인 중…");
+        Point anchor = TryGetCaretOrCursorAnchor(hwndAtPress);
+                var tooltip = new PrettyTooltipForm("⏳ 선택 텍스트 확인 중…", cfg.tooltip_stay_ms, anchor);
 
         var cts = CancellationTokenSource.CreateLinkedTokenSource(externalCt);
         tooltip.FormClosed += (_, __) => { try { cts.Cancel(); cts.Dispose(); } catch { } };
@@ -1117,14 +1273,15 @@ public static class App
         {
             try
             {
-                tooltip.SetBusy(true); // 요청 시작 전 Busy
+                // Prevent auto-close while we're busy capturing context and calling LLM
+                tooltip.MarkLlmInFlight(true);
 
                 string? context = presetContextOrNull;
                 if (string.IsNullOrWhiteSpace(context))
                     context = await GetContextTextPreferSelectionAsync(cfg, cts.Token, hwndAtPress);
 
                 Logger.Info("Context captured: " + (context == null ? "null" : $"len={context.Length}"));
-                if (string.IsNullOrWhiteSpace(context)) { tooltip.SetText("📌 선택 텍스트/클립보드 모두 찾지 못했습니다."); return; }
+                if (string.IsNullOrWhiteSpace(context)) { tooltip.MarkLlmInFlight(false); tooltip.SetText("📌 선택 텍스트/클립보드 모두 찾지 못했습니다."); return; }
 
                 string[] prompts = NormalizePrompts(cfg);
                 string chosen = forcedPrompt ?? prompts[0];
@@ -1132,36 +1289,55 @@ public static class App
 
                 tooltip.SetText("⏳ LLM에 요청 중…");
 
-                // per-request timeout
-                int seconds = cfg.request_timeout_seconds > 0 ? cfg.request_timeout_seconds : 10;
-                using var reqTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(seconds));
-                using var linked = CancellationTokenSource.CreateLinkedTokenSource(cts.Token, reqTimeout.Token);
-
-                string answer;
-                try
-                {
-                    answer = await QueryLLMAsync(http, cfg, chosen, context!, linked.Token);
-                }
-                catch (OperationCanceledException) when (reqTimeout.IsCancellationRequested && !cts.IsCancellationRequested)
-                {
-                    Logger.Warn($"LLM request timeout after {seconds}s");
-                    tooltip.SetText($"⏱️ 요청이 제한시간 {seconds}초를 초과했습니다. Settings에서 Request Timeout을 늘려보세요.");
-                    return;
-                }
-
+                string answer = await QueryLLMAsync(http, cfg, chosen, context!, cts.Token);
                 Logger.Info("LLM response len=" + (answer?.Length ?? 0));
-                tooltip.SetText(string.IsNullOrEmpty(answer) ? "(빈 응답)" : answer);
+
+                if (tooltip.IsHandleCreated && !tooltip.IsDisposed)
+                {
+                    tooltip.BeginInvoke(new Action(() =>
+                    {
+                        tooltip.MarkLlmInFlight(false);
+                        tooltip.SetText(string.IsNullOrEmpty(answer) ? "(빈 응답)" : answer);
+                    }));
+                }
             }
             catch (OperationCanceledException)
-            { Logger.Info("Trigger canceled (silent)."); tooltip.BeginFadeOut(); return; }
-            catch (ObjectDisposedException ode)
-            { Logger.Warn("Token disposed during Shown handler: " + ode.Message); tooltip.BeginFadeOut(); return; }
-            catch (Exception ex)
-            { Logger.Error(ex, "TriggerOnceAsync error"); tooltip.SetText($"❌ Error: {ex.Message}"); }
-            finally
             {
-                tooltip.StickFor(3500); // 결과 읽을 시간 3.5초
-                tooltip.SetBusy(false); // Busy 해제
+                Logger.Info("Trigger canceled (silent).");
+                if (tooltip.IsHandleCreated && !tooltip.IsDisposed)
+                {
+                    tooltip.BeginInvoke(new Action(() =>
+                    {
+                        tooltip.MarkLlmInFlight(false);
+                        tooltip.ShowErrorThenAutoClose("⏹️ 취소됨", cfg.tooltip_error_ms);
+                    }));
+                }
+                return;
+            }
+            catch (ObjectDisposedException ode)
+            {
+                Logger.Warn("Token disposed during Shown handler: " + ode.Message);
+                if (tooltip.IsHandleCreated && !tooltip.IsDisposed)
+                {
+                    tooltip.BeginInvoke(new Action(() =>
+                    {
+                        tooltip.MarkLlmInFlight(false);
+                        tooltip.ShowErrorThenAutoClose("⚠️ Disposed", cfg.tooltip_error_ms);
+                    }));
+                }
+                return;
+            }
+            catch (Exception ex)
+            {
+                Logger.Error(ex, "TriggerOnceAsync error");
+                if (tooltip.IsHandleCreated && !tooltip.IsDisposed)
+                {
+                    tooltip.BeginInvoke(new Action(() =>
+                    {
+                        tooltip.MarkLlmInFlight(false);
+                        tooltip.ShowErrorThenAutoClose($"❌ Error: {ex.Message}", cfg.tooltip_error_ms);
+                    }));
+                }
             }
         };
 
@@ -1200,8 +1376,21 @@ public static class App
         var handler = new HttpClientHandler();
         if (!string.IsNullOrWhiteSpace(cfg.http_proxy)) { handler.Proxy = new WebProxy(cfg.http_proxy); handler.UseProxy = true; Logger.Info($"Proxy enabled: {cfg.http_proxy}"); }
         if (cfg.disable_ssl_verify) { handler.ServerCertificateCustomValidationCallback = static (_, __, ___, ____) => true; Logger.Warn("SSL verification disabled"); }
-        int timeoutSeconds = Math.Max(5, cfg.request_timeout_seconds); // HttpClient.Timeout은 넉넉히(실제 per-request는 개별 토큰으로 제어)
-        return new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(timeoutSeconds + 5) };
+        int timeoutSeconds = cfg.request_timeout_seconds > 0 ? cfg.request_timeout_seconds : 10;
+        return new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(timeoutSeconds) };
+    }
+
+    private static AppConfig LoadConfigWithEnvOverrides()
+    {
+        var cfg = LoadConfig();
+
+        // Environment overrides for update repo owner/name
+        string? envOwner = "jong-hun-lee";
+        string? envRepo = "chatmouse";
+        if (!string.IsNullOrWhiteSpace(envOwner)) cfg.update_repo_owner = envOwner.Trim();
+        if (!string.IsNullOrWhiteSpace(envRepo))  cfg.update_repo_name  = envRepo.Trim();
+
+        return cfg;
     }
 
     private static AppConfig LoadConfig()
@@ -1231,7 +1420,11 @@ public static class App
                 disable_ssl_verify = false,
                 tray_mode = true,
                 hotkey = "Ctrl+Shift+Space",
-                request_timeout_seconds = 12,
+                request_timeout_seconds = 10,
+
+                tooltip_stay_ms = 6000,
+                tooltip_error_ms = 3500,
+                llm_custom_headers = Array.Empty<string>(),
 
                 update_check_enabled = true,
                 update_repo_owner = "qmoix",
@@ -1262,10 +1455,14 @@ public static class App
         if (ph.Length < 9) { Array.Resize(ref ph, 9); cfg.prompt_hotkeys = ph; changed = true; }
 
         if (string.IsNullOrWhiteSpace(cfg.hotkey))  { cfg.hotkey = "Ctrl+Shift+Space"; changed = true; }
-        if (cfg.request_timeout_seconds <= 0) { cfg.request_timeout_seconds = 12; changed = true; }
+        if (cfg.request_timeout_seconds <= 0) { cfg.request_timeout_seconds = 10; changed = true; }
         if (!raw.Contains("\"tray_mode\"")) { cfg.tray_mode = true; changed = true; }
 
         if (cfg.prompt != (cfg.prompts[0] ?? "")) { cfg.prompt = cfg.prompts[0] ?? ""; changed = true; }
+
+        if (!raw.Contains("\"tooltip_stay_ms\"")) { cfg.tooltip_stay_ms = 6000; changed = true; }
+        if (!raw.Contains("\"tooltip_error_ms\"")) { cfg.tooltip_error_ms = 3500; changed = true; }
+        if (cfg.llm_custom_headers == null) { cfg.llm_custom_headers = Array.Empty<string>(); changed = true; }
 
         if (!raw.Contains("\"update_check_enabled\"")) { cfg.update_check_enabled = true; changed = true; }
         if (string.IsNullOrWhiteSpace(cfg.update_repo_owner)) { cfg.update_repo_owner = "qmoix"; changed = true; }
@@ -1322,7 +1519,7 @@ public static class App
 
     private static void ReloadConfigSafe()
     {
-        var newCfg = LoadConfig();
+        var newCfg = LoadConfigWithEnvOverrides();
         Logger.Info($"Using config path: {ConfigPath}");
         _cfgCurrent = newCfg;
         try
@@ -1357,6 +1554,8 @@ public static class App
                 cfg.prompt_hotkeys = normH;
 
                 cfg.prompt = cfg.prompts[0] ?? "";
+                if (cfg.tooltip_stay_ms < 1500) cfg.tooltip_stay_ms = 1500;
+                if (cfg.tooltip_error_ms < 1500) cfg.tooltip_error_ms = 1500;
 
                 File.WriteAllText(ConfigPath, JsonSerializer.Serialize(cfg, JsonOpts), new UTF8Encoding(false));
                 _cfgCurrent = cfg;
@@ -1384,6 +1583,49 @@ public static class App
 
     #region LLM
 
+    private static Dictionary<string, string> ParseCustomHeaders(string[]? lines)
+    {
+        var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (lines == null || lines.Length == 0) return dict;
+
+        // JSON 형식인지 확인 (첫 번째 줄이 {로 시작하고 마지막 줄이 }로 끝나는 경우)
+        string combined = string.Join("", lines.Select(l => (l ?? "").Trim()));
+        if (combined.StartsWith("{") && combined.EndsWith("}"))
+        {
+            try
+            {
+                var jsonDict = JsonSerializer.Deserialize<Dictionary<string, string>>(combined, JsonOpts);
+                if (jsonDict != null)
+                {
+                    foreach (var kv in jsonDict)
+                    {
+                        if (!string.IsNullOrWhiteSpace(kv.Key))
+                            dict[kv.Key] = kv.Value ?? "";
+                    }
+                }
+                return dict;
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"Failed to parse custom headers as JSON: {ex.Message}");
+                // JSON 파싱 실패 시 기존 방식으로 fallback
+            }
+        }
+
+        // 기존 "Header: Value" 형식 파싱
+        foreach (var raw in lines)
+        {
+            var s = (raw ?? "").Trim();
+            if (s.Length == 0) continue;
+            int p = s.IndexOf(':');
+            if (p <= 0) continue;
+            var key = s.Substring(0, p).Trim();
+            var val = s.Substring(p + 1).Trim();
+            if (key.Length > 0) dict[key] = val;
+        }
+        return dict;
+    }
+
     private static async Task<string> QueryLLMAsync(HttpClient http, AppConfig cfg, string prompt, string userText, CancellationToken ct)
     {
         string baseUrl = (cfg.base_url ?? "").TrimEnd('/');
@@ -1403,8 +1645,11 @@ public static class App
         using var httpReq = new HttpRequestMessage(HttpMethod.Post, endpoint)
         { Content = new StringContent(json, Encoding.UTF8, "application/json") };
 
-        if (!string.Equals(cfg.api_key, "EMPTY", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(cfg.api_key))
-            httpReq.Headers.Add("Authorization", $"Bearer {cfg.api_key}");
+        // Auth & custom headers
+        bool hasBearer = !string.Equals(cfg.api_key, "EMPTY", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(cfg.api_key);
+        if (hasBearer) httpReq.Headers.Add("Authorization", $"Bearer {cfg.api_key}");
+        var extra = ParseCustomHeaders(cfg.llm_custom_headers);
+        foreach (var kv in extra) { try { httpReq.Headers.TryAddWithoutValidation(kv.Key, kv.Value); } catch { } }
 
         try
         {
@@ -1413,7 +1658,11 @@ public static class App
             var body = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
             Logger.Info($"HTTP {(int)resp.StatusCode} {resp.ReasonPhrase}, {body.Length} bytes");
 
-            if (!resp.IsSuccessStatusCode) return $"❌ Request failed ({(int)resp.StatusCode}): {resp.ReasonPhrase}";
+            if (!resp.IsSuccessStatusCode)
+            {
+                LogRequestDetailsForError(endpoint, cfg, prompt, userText, extra, resp.StatusCode + " " + resp.ReasonPhrase);
+                return $"❌ Request failed ({(int)resp.StatusCode}): {resp.ReasonPhrase}";
+            }
 
             try
             {
@@ -1421,14 +1670,28 @@ public static class App
                 string? content = chatResp?.choices?.Length > 0 ? chatResp!.choices[0].message?.content : null;
                 return string.IsNullOrWhiteSpace(content) ? "(no response)" : content!.Trim();
             }
-            catch (Exception ex) { Logger.Error(ex, "Parse LLM JSON failed"); return "⚠️ Failed to parse JSON response"; }
+            catch (Exception ex) { Logger.Error(ex, "Parse LLM JSON failed"); LogRequestDetailsForError(endpoint, cfg, prompt, userText, extra, "parse-json"); return "⚠️ Failed to parse JSON response"; }
         }
-        catch (TaskCanceledException) when (ct.IsCancellationRequested)
+        catch (TaskCanceledException) when (ct.IsCancellationRequested) { Logger.Info("HTTP canceled"); throw; }
+        catch (Exception ex)
         {
-            Logger.Warn("HTTP canceled by token");
-            throw;
+            Logger.Error(ex, "HTTP error");
+            LogRequestDetailsForError(endpoint, cfg, prompt, userText, extra, "exception:" + ex.GetType().Name);
+            return $"❌ Network error: {ex.Message}";
         }
-        catch (Exception ex) { Logger.Error(ex, "HTTP error"); return $"❌ Network error: {ex.Message}"; }
+    }
+
+    private static void LogRequestDetailsForError(string url, AppConfig cfg, string sysPrompt, string userPrompt, Dictionary<string, string> extraHeaders, string note)
+    {
+        string token10 = (cfg.api_key ?? "").Length > 10 ? cfg.api_key.Substring(0, 10) : cfg.api_key ?? "";
+        var headerDump = string.Join(", ", extraHeaders.Select(kv => kv.Key + "=" + kv.Value));
+        Logger.Warn($"LLM-REQ-ERROR [{note}] url={url} model={cfg.model} token10='{token10}' headers=[{headerDump}] sys='{Trunc(sysPrompt, 120)}' user='{Trunc(userPrompt, 120)}'");
+    }
+
+    private static string Trunc(string s, int n)
+    {
+        if (string.IsNullOrEmpty(s)) return "";
+        return s.Length <= n ? s : s.Substring(0, n) + " …";
     }
 
     #endregion
@@ -1443,12 +1706,16 @@ public static class App
     [DllImport("user32.dll", CharSet = CharSet.Auto)] private static extern IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
     [DllImport("user32.dll", CharSet = CharSet.Auto)] private static extern int SendMessage(IntPtr hWnd, uint msg, int wParam, StringBuilder lParam);
     [DllImport("user32.dll", CharSet = CharSet.Auto)] private static extern IntPtr SendMessage(IntPtr hWnd, uint msg, out int wParam, out int lParam);
+    [DllImport("user32.dll", SetLastError = true)] private static extern bool ClientToScreen(IntPtr hWnd, ref POINT lpPoint);
+    [DllImport("user32.dll")] private static extern bool SetProcessDpiAwarenessContext(IntPtr dpiContext);
+    private static readonly IntPtr DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = new IntPtr(-4);
 
     private const uint WM_GETTEXT = 0x000D;
     private const uint WM_GETTEXTLENGTH = 0x000E;
     private const uint EM_GETSEL = 0x00B0;
 
     [StructLayout(LayoutKind.Sequential)] private struct RECT { public int left, top, right, bottom; }
+    [StructLayout(LayoutKind.Sequential)] private struct POINT { public int x, y; }
     [StructLayout(LayoutKind.Sequential)]
     private struct GUITHREADINFO
     {
@@ -1500,6 +1767,39 @@ public static class App
         inputs[2].type = INPUT_KEYBOARD; inputs[2].U.ki = new KEYBDINPUT { wVk = VK_C, dwFlags = KEYEVENTF_KEYUP };
         inputs[3].type = INPUT_KEYBOARD; inputs[3].U.ki = new KEYBDINPUT { wVk = VK_CONTROL, dwFlags = KEYEVENTF_KEYUP };
         SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<INPUT>());
+    }
+
+    private static Point TryGetCaretOrCursorAnchor(IntPtr hwndAtPress)
+    {
+        try
+        {
+            IntPtr targetHwnd = hwndAtPress != IntPtr.Zero ? hwndAtPress : GetForegroundWindow();
+            if (targetHwnd != IntPtr.Zero)
+            {
+                uint tid = GetWindowThreadProcessId(targetHwnd, out _);
+                GUITHREADINFO gti = new() { cbSize = Marshal.SizeOf<GUITHREADINFO>() };
+                if (GetGUIThreadInfo(tid, ref gti))
+                {
+                    if (gti.hwndCaret != IntPtr.Zero)
+                    {
+                        POINT pt = new POINT { x = gti.rcCaret.left, y = gti.rcCaret.top };
+                        if (ClientToScreen(gti.hwndCaret, ref pt))
+                        {
+                            var p = new Point(pt.x, pt.y);
+                            Logger.Info($"Anchor chosen: caret ({p.X},{p.Y})");
+                            return p;
+                        }
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn("TryGetCaretOrCursorAnchor failed: " + ex.Message);
+        }
+        var cur = Cursor.Position;
+        Logger.Info($"Anchor chosen: cursor ({cur.X},{cur.Y})");
+        return cur;
     }
 
     private static async Task<string?> GetContextTextPreferSelectionAsync(AppConfig cfg, CancellationToken outerCt, IntPtr hwndAtPress)
@@ -1705,11 +2005,28 @@ public static class App
 
     #region Update Checker + Release Notes UI
 
-    private static string GetCurrentVersionString()
+    public static string GetCurrentVersionString()
     {
         try
         {
-            var v = System.Reflection.Assembly.GetExecutingAssembly()?.GetName()?.Version;
+            var asm = System.Reflection.Assembly.GetExecutingAssembly();
+            // Prefer InformationalVersion if present (can include semver + metadata)
+            var infoAttr = (System.Reflection.AssemblyInformationalVersionAttribute?)Attribute.GetCustomAttribute(
+                asm, typeof(System.Reflection.AssemblyInformationalVersionAttribute));
+            if (infoAttr != null && !string.IsNullOrWhiteSpace(infoAttr.InformationalVersion))
+            {
+                return infoAttr.InformationalVersion.Trim();
+            }
+
+            // Fall back to AssemblyFileVersion
+            var fileAttr = (System.Reflection.AssemblyFileVersionAttribute?)Attribute.GetCustomAttribute(
+                asm, typeof(System.Reflection.AssemblyFileVersionAttribute));
+            if (fileAttr != null && !string.IsNullOrWhiteSpace(fileAttr.Version))
+            {
+                return fileAttr.Version.Trim();
+            }
+
+            var v = asm.GetName()?.Version;
             if (v == null) return "0.0.0";
             return new Version(v.Major, v.Minor, v.Build < 0 ? 0 : v.Build).ToString();
         }
@@ -1794,8 +2111,41 @@ public static class App
         }
 
         ShowReleaseNotesDialog(latest, isManual: false);
+
         cfg.last_notified_version = latest.Tag;
         SaveConfig(cfg);
+    }
+
+    public static async Task ManualCheckUpdateFromSettingsAsync()
+    {
+        try
+        {
+            var cfg = GetCurrentConfig();
+            var http = _httpGlobal ?? CreateHttp(cfg);
+            var current = GetCurrentVersionString();
+            var latest = await GetLatestReleaseAsync(cfg, http);
+            if (latest == null)
+            {
+                MessageBox.Show("No releases found for the configured repository.", "ChatMouse", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            bool newer = IsNewer(latest.Tag, current);
+            if (newer)
+            {
+                ShowReleaseNotesDialog(latest, isManual: true);
+                cfg.last_notified_version = latest.Tag;
+                SaveConfig(cfg);
+            }
+            else
+            {
+                MessageBox.Show($"You're up to date.\nCurrent: {current}\nLatest: {latest.Tag}", "ChatMouse", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn("Manual update check from Settings failed: " + ex.Message);
+            MessageBox.Show("Update check failed: " + ex.Message, "ChatMouse", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
     }
 
     private static void ShowReleaseNotesDialog(GhRelease rel, bool isManual)
@@ -1825,30 +2175,49 @@ public static class App
 #endregion
 
 // ===============================
-// Settings UI (ConfigForm)
+// Settings UI (Tabbed)
 // ===============================
 #region Settings UI
 
 public class ConfigForm : Form
 {
-    private readonly TextBox tbBaseUrl = new() { Width = 420 };
-    private readonly TextBox tbApiKey = new() { Width = 420 };
-    private readonly TextBox tbModel = new() { Width = 420 };
+    // Tabs
+    private readonly TabControl tabs = new() { Dock = DockStyle.Fill, Padding = new Point(12, 6) };
+    private readonly TabPage tabGeneral = new() { Text = "General" };
+    private readonly TabPage tabPrompts = new() { Text = "Prompts & Hotkeys" };
+    private readonly TabPage tabLLM = new() { Text = "LLM" };
+    private readonly TabPage tabNetwork = new() { Text = "Network" };
+    private readonly TabPage tabUpdates = new() { Text = "Versions" };
 
-    private readonly TextBox[] tbPrompts = Enumerable.Range(0, 9).Select(_ => new TextBox { Multiline = true, ScrollBars = ScrollBars.Vertical }).ToArray();
-    private readonly TextBox[] tbPromptHotkeys = Enumerable.Range(0, 9).Select(_ => new TextBox()).ToArray();
+    // General
+    private readonly TextBox tbMainHotkey = new() { Dock = DockStyle.Fill };
+    private readonly CheckBox cbAllowClip = new() { Text = "Allow clipboard probe", AutoSize = true, Anchor = AnchorStyles.Left };
+    private readonly CheckBox cbTrayMode = new() { Text = "Start in tray mode", AutoSize = true, Anchor = AnchorStyles.Left };
+    private readonly NumericUpDown nudTooltipStay = new() { Minimum = 1500, Maximum = 60000, Increment = 500, Width = 120 };
+    private readonly NumericUpDown nudTooltipError = new() { Minimum = 1500, Maximum = 60000, Increment = 500, Width = 120 };
 
-    private readonly TextBox tbHotkey = new();
-    private readonly TextBox tbProxy = new() { Width = 420 };
-    private readonly NumericUpDown nudTimeout = new() { Minimum = 5, Maximum = 300, DecimalPlaces = 0 };
-    private readonly CheckBox cbAllowClip = new() { Text = "Allow clipboard probe" };
-    private readonly CheckBox cbTrayMode = new() { Text = "Start in tray mode" };
-    private readonly CheckBox cbSslOff = new() { Text = "Disable SSL verification" };
+    // Prompts & Hotkeys
+    private readonly Panel pnlScrollPrompts = new() { Dock = DockStyle.Fill, AutoScroll = true };
+    private readonly List<TextBox> tbPrompts = new();
+    private readonly List<TextBox> tbPromptHotkeys = new();
 
-    // Update checker UI bits
+    // LLM
+    private readonly TextBox tbBaseUrl = new() { Dock = DockStyle.Fill };
+    private readonly TextBox tbApiKey = new() { Dock = DockStyle.Fill, UseSystemPasswordChar = true };
+    private readonly TextBox tbModel = new() { Dock = DockStyle.Fill };
+    private readonly TextBox tbCustomHeaders = new() { Multiline = true, ScrollBars = ScrollBars.Vertical, AcceptsReturn = true, Dock = DockStyle.Fill, MinimumSize = new Size(0, 160) };
+
+    // Network
+    private readonly TextBox tbProxy = new() { Dock = DockStyle.Fill };
+    private readonly NumericUpDown nudTimeout = new() { Width = 120, Minimum = 1, Maximum = 300, DecimalPlaces = 0 };
+    private readonly CheckBox cbSslOff = new() { Text = "Disable SSL verification", AutoSize = true, Anchor = AnchorStyles.Left };
+
+    // Updates (Owner/Repo readonly)
     private readonly CheckBox cbUpdate = new() { Text = "Check updates on startup" };
-    private readonly TextBox tbRepoOwner = new() { Width = 180, PlaceholderText = "owner" };
-    private readonly TextBox tbRepoName  = new() { Width = 180, PlaceholderText = "repo" };
+    private readonly Button btnUpdateCheck = new() { Text = "Update Check" };
+    private readonly TextBox tbCurrentVersion = new() { ReadOnly = true, Dock = DockStyle.Fill };
+    private readonly TextBox tbRepoOwner = new() { ReadOnly = true, Dock = DockStyle.Fill };
+    private readonly TextBox tbRepoName = new() { ReadOnly = true, Dock = DockStyle.Fill };
 
     private readonly Button btnOk = new() { Text = "OK", DialogResult = DialogResult.OK };
     private readonly Button btnCancel = new() { Text = "Cancel", DialogResult = DialogResult.Cancel };
@@ -1859,139 +2228,320 @@ public class ConfigForm : Form
     {
         _cfg = cfg;
         Text = "ChatMouse Settings";
-        FormBorderStyle = FormBorderStyle.FixedDialog;
+        AutoScaleMode = AutoScaleMode.Dpi;
+        FormBorderStyle = FormBorderStyle.Sizable;
         StartPosition = FormStartPosition.CenterParent;
-        MaximizeBox = false; MinimizeBox = false;
-        Width = 860; Height = 820;
+        MaximizeBox = true; MinimizeBox = true;
+        Width = 1200; Height = 900;
+        MinimumSize = new Size(1000, 740);
 
-        // 메인 레이아웃
-        var root = new TableLayoutPanel
+        // Build tabs
+        BuildGeneralTab();
+        BuildPromptsTab();
+        BuildLLMTab();
+        BuildNetworkTab();
+        BuildUpdatesTab();
+
+        // Bottom buttons (auto-size so they never get clipped at high DPI)
+        btnOk.AutoSize = true;
+        btnCancel.AutoSize = true;
+        var btnPanel = new FlowLayoutPanel
         {
-            Dock = DockStyle.Fill,
+            Dock = DockStyle.Bottom,
+            FlowDirection = FlowDirection.RightToLeft,
             Padding = new Padding(12),
-            ColumnCount = 1,
-            RowCount = 3,
-        };
-        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        Controls.Add(root);
-
-        // 스크롤 영역
-        var scroll = new Panel { Dock = DockStyle.Fill, AutoScroll = true };
-        root.Controls.Add(scroll, 0, 0);
-
-        var form = new TableLayoutPanel
-        {
-            Dock = DockStyle.Top,
+            WrapContents = false,
             AutoSize = true,
-            ColumnCount = 3,
-            Padding = new Padding(4),
+            AutoSizeMode = AutoSizeMode.GrowAndShrink
         };
-        form.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120));
-        form.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        form.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 220));
-        scroll.Controls.Add(form);
-
-        void AddRow2(string label, Control ctrl)
-        {
-            int row = form.RowCount++;
-            form.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            form.Controls.Add(new Label { Text = label, AutoSize = true, Anchor = AnchorStyles.Left, Padding = new Padding(0, 6, 6, 0) }, 0, row);
-            form.Controls.Add(ctrl, 1, row);
-        }
-        void AddRow3(string label, Control left, Control right)
-        {
-            int row = form.RowCount++;
-            form.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            form.Controls.Add(new Label { Text = label, AutoSize = true, Anchor = AnchorStyles.Left, Padding = new Padding(0, 6, 6, 0) }, 0, row);
-            form.Controls.Add(left, 1, row);
-            form.Controls.Add(right, 2, row);
-        }
-
-        AddRow2("Base URL:", tbBaseUrl);
-        AddRow2("API Key:", tbApiKey);
-        AddRow2("Model:", tbModel);
-
-        var prompts = (_cfg.prompts ?? Array.Empty<string>()).ToArray();
-        if (prompts.Length < 9) Array.Resize(ref prompts, 9);
-        var promptHotkeys = (_cfg.prompt_hotkeys ?? Array.Empty<string>()).ToArray();
-        if (promptHotkeys.Length < 9) Array.Resize(ref promptHotkeys, 9);
-
-        // 프롬프트들: 크기를 넉넉히
-        for (int i = 0; i < 9; i++)
-        {
-            var tbP = tbPrompts[i];
-            tbP.Width = 520;
-            tbP.Height = i == 0 ? 100 : 80;
-
-            var tbH = tbPromptHotkeys[i];
-            tbH.Width = 200;
-
-            tbP.Text = prompts[i] ?? (i == 0 ? (_cfg.prompt ?? "") : "");
-            tbH.Text = promptHotkeys[i] ?? "";
-
-            AddRow3($"Prompt {i + 1}:", tbP, tbH);
-        }
-
-        tbHotkey.Width = 200;
-        AddRow2("Main Hotkey:", tbHotkey);
-
-        // 업데이트 체크 UI
-        int rowUpdate = form.RowCount++;
-        form.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        var pnlUpdate = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
-        pnlUpdate.Controls.Add(cbUpdate);
-        pnlUpdate.Controls.Add(new Label { Text = " Owner:", AutoSize = true, Padding = new Padding(12, 6, 0, 0) });
-        pnlUpdate.Controls.Add(tbRepoOwner);
-        pnlUpdate.Controls.Add(new Label { Text = " Repo:", AutoSize = true, Padding = new Padding(12, 6, 0, 0) });
-        pnlUpdate.Controls.Add(tbRepoName);
-        form.Controls.Add(new Label { Text = "Updates:", AutoSize = true, Anchor = AnchorStyles.Left, Padding = new Padding(0, 6, 6, 0) }, 0, rowUpdate);
-        form.Controls.Add(pnlUpdate, 1, rowUpdate);
-
-        AddRow2("HTTP Proxy:", tbProxy);
-
-        var pnlTimeout = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.LeftToRight };
-        nudTimeout.Width = 80;
-        pnlTimeout.Controls.Add(nudTimeout);
-        pnlTimeout.Controls.Add(new Label { Text = " seconds", AutoSize = true, Padding = new Padding(6, 6, 0, 0) });
-        AddRow2("Request Timeout:", pnlTimeout);
-
-        // 체크 옵션들
-        int rowChk = form.RowCount++;
-        form.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        var pnlChecks = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.LeftToRight, WrapContents = true };
-        pnlChecks.Controls.Add(cbAllowClip);
-        pnlChecks.Controls.Add(cbTrayMode);
-        pnlChecks.Controls.Add(cbSslOff);
-        form.Controls.Add(new Label { Text = "", AutoSize = true }, 0, rowChk);
-        form.Controls.Add(pnlChecks, 1, rowChk);
-
-        // 버튼 바
-        var btnPanel = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, Padding = new Padding(0, 8, 0, 8) };
-        btnOk.AutoSize = true; btnCancel.AutoSize = true;
         btnPanel.Controls.Add(btnOk);
         btnPanel.Controls.Add(btnCancel);
-        root.Controls.Add(btnPanel, 0, 1);
 
-        // 값 채우기
-        tbBaseUrl.Text = _cfg.base_url;
-        tbApiKey.Text = _cfg.api_key;
-        tbModel.Text = _cfg.model;
+        // Set default dialog buttons
+        this.AcceptButton = btnOk;
+        this.CancelButton = btnCancel;
 
-        tbHotkey.Text = _cfg.hotkey;
-        tbProxy.Text = _cfg.http_proxy ?? "";
-        nudTimeout.Value = _cfg.request_timeout_seconds > 0 ? _cfg.request_timeout_seconds : 12;
-        cbAllowClip.Checked = _cfg.allow_clipboard_probe;
-        cbTrayMode.Checked = _cfg.tray_mode;
-        cbSslOff.Checked = _cfg.disable_ssl_verify;
+        // Tab control
+        tabs.TabPages.AddRange(new[] { tabGeneral, tabPrompts, tabLLM, tabNetwork, tabUpdates });
 
-        cbUpdate.Checked = _cfg.update_check_enabled;
-        tbRepoOwner.Text = _cfg.update_repo_owner ?? "";
-        tbRepoName.Text  = _cfg.update_repo_name  ?? "";
+        // Important: add btnPanel after tabs so DockStyle.Bottom reserves space and buttons don't overlap
+        Controls.Add(tabs);
+        Controls.Add(btnPanel);
+
+        // Fill values
+        FillValuesFromConfig();
 
         btnOk.Click += (_, __) => { DialogResult = DialogResult.OK; Close(); };
         btnCancel.Click += (_, __) => { DialogResult = DialogResult.Cancel; Close(); };
+    }
+
+    private void BuildGeneralTab()
+    {
+        var layout = NewTable(2);
+        int row = 0;
+
+        // Scale label column with DPI to avoid clipping at 125%+
+        var scale = this.DeviceDpi > 0 ? (this.DeviceDpi / 96f) : 1f;
+        int labelCol = (int)Math.Round(160 * scale);
+        layout.ColumnStyles[0] = new ColumnStyle(SizeType.Absolute, labelCol);
+
+        AddRow2(layout, ref row, "Main Hotkey:", tbMainHotkey);
+        AddRow2(layout, ref row, "Tooltip Stay (ms):", nudTooltipStay);
+        AddRow2(layout, ref row, "Tooltip Error (ms):", nudTooltipError);
+        // Checkboxes should span both columns so their text never gets clipped by an empty label cell
+        AddRowSpan2(layout, ref row, cbAllowClip);
+        AddRowSpan2(layout, ref row, cbTrayMode);
+
+        tabGeneral.Controls.Add(layout);
+    }
+
+    private void BuildPromptsTab()
+    {
+        var root = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12), ColumnCount = 1 };
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+
+        var header = new Label { Text = "Prompts (1..9) and Hotkeys", AutoSize = true, Font = new Font("Segoe UI", 10.5f, FontStyle.Bold) };
+        root.Controls.Add(header, 0, 0);
+
+        var inner = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = false, ColumnCount = 3 };
+        inner.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        inner.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        inner.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+
+        var prompts = (_cfg.prompts ?? Array.Empty<string>()).ToArray();
+        if (prompts.Length < 9) Array.Resize(ref prompts, 9);
+        var hks = (_cfg.prompt_hotkeys ?? Array.Empty<string>()).ToArray();
+        if (hks.Length < 9) Array.Resize(ref hks, 9);
+
+        for (int i = 0; i < 9; i++)
+        {
+            var lbl = new Label { Text = $"Prompt {i + 1}:", AutoSize = true, Anchor = AnchorStyles.Left, Padding = new Padding(0, 6, 6, 0) };
+            var tbP = new TextBox { Multiline = true, ScrollBars = ScrollBars.Vertical, AcceptsReturn = true, Text = prompts[i] ?? "", Dock = DockStyle.Fill, MinimumSize = new Size(0, 120) };
+            var tbH = new TextBox { Text = hks[i] ?? "", Dock = DockStyle.Fill, MinimumSize = new Size(140, 0) };
+
+            tbPrompts.Add(tbP);
+            tbPromptHotkeys.Add(tbH);
+
+            int r = inner.RowCount++;
+            inner.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            inner.Controls.Add(lbl, 0, r);
+            inner.Controls.Add(tbP, 1, r);
+            inner.Controls.Add(tbH, 2, r);
+        }
+
+        pnlScrollPrompts.Controls.Add(inner);
+        root.Controls.Add(pnlScrollPrompts, 0, 1);
+
+        tabPrompts.Controls.Add(root);
+    }
+
+    private void BuildLLMTab()
+    {
+        var layout = NewTable(2);
+        int row = 0;
+        
+        // 레이블 컬럼 너비를 고정하여 정렬 개선
+        // Scale label column width with DPI so text doesn’t clip on 125%+
+        var scale = this.DeviceDpi > 0 ? (this.DeviceDpi / 96f) : 1f;
+        int labelCol = (int)Math.Round(160 * scale);
+        layout.ColumnStyles[0] = new ColumnStyle(SizeType.Absolute, labelCol);
+        
+        AddRow2(layout, ref row, "Base URL:", tbBaseUrl);
+        AddRow2(layout, ref row, "API Key (Bearer):", tbApiKey);
+        AddRow2(layout, ref row, "Model:", tbModel);
+        
+        // Custom Headers: 레이블과 설명을 분리하여 더 깔끔하게
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        var lblHeaders = new Label 
+        { 
+            Text = "Custom Headers:", 
+            AutoSize = true, 
+            Anchor = AnchorStyles.Left | AnchorStyles.Top, 
+            Padding = new Padding(0, 6, 6, 0) 
+        };
+        layout.Controls.Add(lblHeaders, 0, row);
+        
+        var pnlHeaders = new Panel { Dock = DockStyle.Fill };
+        tbCustomHeaders.Dock = DockStyle.Top;
+        tbCustomHeaders.Height = 120;
+        pnlHeaders.Controls.Add(tbCustomHeaders);
+        
+        var lblHeadersDesc = new Label
+        {
+            Text = "Format: \"Header: Value\" per line, or JSON object",
+            AutoSize = true,
+            ForeColor = Color.Gray,
+            Font = new Font("Segoe UI", 8.5f),
+            Padding = new Padding(0, 4, 0, 0),
+            Dock = DockStyle.Top
+        };
+        pnlHeaders.Controls.Add(lblHeadersDesc);
+        pnlHeaders.Controls.SetChildIndex(lblHeadersDesc, 0);
+        pnlHeaders.Controls.SetChildIndex(tbCustomHeaders, 1);
+        
+        layout.Controls.Add(pnlHeaders, 1, row);
+        row++;
+        
+        tabLLM.Controls.Add(layout);
+    }
+
+    private void BuildNetworkTab()
+    {
+        var layout = NewTable(2);
+        int row = 0;
+
+        // DPI-scaled label column to avoid truncation at 125%+
+        var scale = this.DeviceDpi > 0 ? (this.DeviceDpi / 96f) : 1f;
+        int labelCol = (int)Math.Round(160 * scale);
+        layout.ColumnStyles[0] = new ColumnStyle(SizeType.Absolute, labelCol);
+
+        AddRow2(layout, ref row, "HTTP Proxy:", tbProxy);
+        AddRow2(layout, ref row, "Request Timeout (seconds):", nudTimeout);
+        // Checkbox should span both columns so its caption never clips
+        AddRowSpan2(layout, ref row, cbSslOff);
+        tabNetwork.Controls.Add(layout);
+    }
+
+    private void BuildUpdatesTab()
+    {
+        var layout = NewTable(2);
+        int row = 0;
+
+        // DPI-scaled label column width
+        var scale = this.DeviceDpi > 0 ? (this.DeviceDpi / 96f) : 1f;
+        int labelCol = (int)Math.Round(160 * scale);
+        layout.ColumnStyles[0] = new ColumnStyle(SizeType.Absolute, labelCol);
+
+        // Top action row: Update Check button aligned left, spans both columns
+        btnUpdateCheck.AutoSize = true;
+        btnUpdateCheck.Click += async (_, __) => { try { await App.ManualCheckUpdateFromSettingsAsync(); } catch { } };
+        AddRowSpan2(layout, ref row, btnUpdateCheck);
+
+        // Option: check on startup
+        AddRowSpan2(layout, ref row, cbUpdate);
+
+        // Current version (read-only)
+        AddRow2(layout, ref row, "Current Version:", tbCurrentVersion);
+
+        // Read-only owner/repo (read-only, aligned)
+        AddRow2(layout, ref row, "Repo Owner:", tbRepoOwner);
+        AddRow2(layout, ref row, "Repo Name:", tbRepoName);
+
+        // Removed verbose English tip per request
+
+        tabUpdates.Controls.Add(layout);
+    }
+
+    private static TableLayoutPanel NewTable(int cols)
+    {
+        var layout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            Padding = new Padding(12),
+            ColumnCount = cols,
+            AutoSize = false
+        };
+        if (cols == 2)
+        {
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        }
+        else
+        {
+            for (int i = 0; i < cols; i++) layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f / cols));
+        }
+        return layout;
+    }
+
+    private static void AddRow2(TableLayoutPanel layout, ref int row, string label, Control ctrl)
+    {
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.Controls.Add(new Label { Text = label, AutoSize = true, Anchor = AnchorStyles.Left, Padding = new Padding(0, 6, 6, 0) }, 0, row);
+        layout.Controls.Add(ctrl, 1, row);
+        row++;
+    }
+
+    // Add a single control that should span both columns (useful for long CheckBox text)
+    private static void AddRowSpan2(TableLayoutPanel layout, ref int row, Control ctrl)
+    {
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        ctrl.Anchor = AnchorStyles.Left;
+        ctrl.AutoSize = true;
+        layout.Controls.Add(ctrl, 0, row);
+        layout.SetColumnSpan(ctrl, 2);
+        row++;
+    }
+
+    private void FillValuesFromConfig()
+    {
+        // General
+        tbMainHotkey.Text = _cfg.hotkey;
+        cbAllowClip.Checked = _cfg.allow_clipboard_probe;
+        cbTrayMode.Checked = _cfg.tray_mode;
+        nudTooltipStay.Value = Math.Max(1500, _cfg.tooltip_stay_ms);
+        nudTooltipError.Value = Math.Max(1500, _cfg.tooltip_error_ms);
+
+        // LLM
+        tbBaseUrl.Text = _cfg.base_url;
+        tbApiKey.Text = _cfg.api_key;
+        tbModel.Text = _cfg.model;
+        // JSON 형식으로 표시 (더 읽기 쉬움)
+        var headers = _cfg.llm_custom_headers ?? Array.Empty<string>();
+        if (headers.Length > 0)
+        {
+            try
+            {
+                // 기존 형식인지 JSON 형식인지 확인
+                string combined = string.Join("", headers.Select(l => (l ?? "").Trim()));
+                if (combined.StartsWith("{") && combined.EndsWith("}"))
+                {
+                    tbCustomHeaders.Text = combined;
+                }
+                else
+                {
+                    // "Header: Value" 형식을 JSON으로 변환하여 표시
+                    var dict = new Dictionary<string, string>();
+                    foreach (var raw in headers)
+                    {
+                        var s = (raw ?? "").Trim();
+                        if (s.Length == 0) continue;
+                        int p = s.IndexOf(':');
+                        if (p <= 0) continue;
+                        var key = s.Substring(0, p).Trim();
+                        var val = s.Substring(p + 1).Trim();
+                        if (key.Length > 0) dict[key] = val;
+                    }
+                    if (dict.Count > 0)
+                    {
+                        tbCustomHeaders.Text = JsonSerializer.Serialize(dict, new JsonSerializerOptions { WriteIndented = true });
+                    }
+                    else
+                    {
+                        tbCustomHeaders.Text = string.Join(Environment.NewLine, headers);
+                    }
+                }
+            }
+            catch
+            {
+                tbCustomHeaders.Text = string.Join(Environment.NewLine, headers);
+            }
+        }
+        else
+        {
+            tbCustomHeaders.Text = "";
+        }
+
+        // Network
+        tbProxy.Text = _cfg.http_proxy ?? "";
+        nudTimeout.Value = _cfg.request_timeout_seconds > 0 ? _cfg.request_timeout_seconds : 10;
+        cbSslOff.Checked = _cfg.disable_ssl_verify;
+
+        // Updates
+        cbUpdate.Checked = _cfg.update_check_enabled;
+        tbCurrentVersion.Text = App.GetCurrentVersionString();
+        tbRepoOwner.Text = _cfg.update_repo_owner ?? "";
+        tbRepoName.Text = _cfg.update_repo_name ?? "";
     }
 
     public AppConfig GetConfig()
@@ -2002,27 +2552,76 @@ public class ConfigForm : Form
         var hotkeys = tbPromptHotkeys.Select(tb => (tb.Text ?? "").Trim()).ToArray();
         if (hotkeys.Length < 9) Array.Resize(ref hotkeys, 9);
 
+        // JSON 형식 또는 "Header: Value" 형식 모두 지원
+        string headersText = (tbCustomHeaders.Text ?? "").Trim();
+        string[] headers;
+        
+        if (headersText.StartsWith("{") && headersText.EndsWith("}"))
+        {
+            // JSON 형식: 파싱하여 "Header: Value" 형식으로 변환
+            try
+            {
+                var jsonOpts = new JsonSerializerOptions
+                {
+                    PropertyNameCaseInsensitive = true,
+                    Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+                };
+                var jsonDict = JsonSerializer.Deserialize<Dictionary<string, string>>(headersText, jsonOpts);
+                if (jsonDict != null && jsonDict.Count > 0)
+                {
+                    headers = jsonDict.Select(kv => $"{kv.Key}: {kv.Value}").ToArray();
+                }
+                else
+                {
+                    headers = Array.Empty<string>();
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"Failed to parse custom headers JSON: {ex.Message}");
+                // JSON 파싱 실패 시 빈 배열로 처리
+                headers = Array.Empty<string>();
+            }
+        }
+        else
+        {
+            // 기존 "Header: Value" 형식
+            headers = headersText
+                .Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(s => s.Trim())
+                .Where(s => s.Length > 0)
+                .ToArray();
+        }
+
         return new AppConfig
         {
-            base_url = tbBaseUrl.Text.Trim(),
-            api_key = tbApiKey.Text.Trim(),
-            model = tbModel.Text.Trim(),
+            // General
+            hotkey = tbMainHotkey.Text.Trim(),
+            allow_clipboard_probe = cbAllowClip.Checked,
+            tray_mode = cbTrayMode.Checked,
+            tooltip_stay_ms = (int)nudTooltipStay.Value,
+            tooltip_error_ms = (int)nudTooltipError.Value,
 
+            // Prompts
             prompt = prompts[0] ?? "",
             prompts = prompts,
             prompt_hotkeys = hotkeys,
 
-            hotkey = tbHotkey.Text.Trim(),
-            allow_clipboard_probe = cbAllowClip.Checked,
-            tray_mode = cbTrayMode.Checked,
+            // LLM
+            base_url = tbBaseUrl.Text.Trim(),
+            api_key = tbApiKey.Text.Trim(),
+            model = tbModel.Text.Trim(),
+            llm_custom_headers = headers,
+
+            // Network
             http_proxy = string.IsNullOrWhiteSpace(tbProxy.Text) ? null : tbProxy.Text.Trim(),
             disable_ssl_verify = cbSslOff.Checked,
             request_timeout_seconds = (int)nudTimeout.Value,
 
+            // Updates
             update_check_enabled = cbUpdate.Checked,
-            update_repo_owner = tbRepoOwner.Text.Trim(),
-            update_repo_name = tbRepoName.Text.Trim(),
-
+            update_repo_owner = _cfg.update_repo_owner, // read-only here
+            update_repo_name = _cfg.update_repo_name,
             last_notified_version = App.GetCurrentConfig().last_notified_version
         };
     }
