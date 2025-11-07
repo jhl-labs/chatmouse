@@ -2182,19 +2182,19 @@ public static class App
 public class ConfigForm : Form
 {
     // Tabs
-    private readonly TabControl tabs = new() { Dock = DockStyle.Fill, Padding = new Point(12, 6) };
-    private readonly TabPage tabGeneral = new() { Text = "General" };
-    private readonly TabPage tabPrompts = new() { Text = "Prompts & Hotkeys" };
-    private readonly TabPage tabLLM = new() { Text = "LLM" };
-    private readonly TabPage tabNetwork = new() { Text = "Network" };
-    private readonly TabPage tabUpdates = new() { Text = "Versions" };
+    private readonly TabControl tabs = new() { Dock = DockStyle.Fill, Padding = new Point(16, 8) };
+    private readonly TabPage tabGeneral = new() { Text = "General", Padding = new Padding(16) };
+    private readonly TabPage tabPrompts = new() { Text = "Prompts & Hotkeys", Padding = new Padding(16) };
+    private readonly TabPage tabLLM = new() { Text = "LLM", Padding = new Padding(16) };
+    private readonly TabPage tabNetwork = new() { Text = "Network", Padding = new Padding(16) };
+    private readonly TabPage tabUpdates = new() { Text = "Updates", Padding = new Padding(16) };
 
     // General
-    private readonly TextBox tbMainHotkey = new() { Dock = DockStyle.Fill };
-    private readonly CheckBox cbAllowClip = new() { Text = "Allow clipboard probe", AutoSize = true, Anchor = AnchorStyles.Left };
-    private readonly CheckBox cbTrayMode = new() { Text = "Start in tray mode", AutoSize = true, Anchor = AnchorStyles.Left };
-    private readonly NumericUpDown nudTooltipStay = new() { Minimum = 1500, Maximum = 60000, Increment = 500, Width = 120 };
-    private readonly NumericUpDown nudTooltipError = new() { Minimum = 1500, Maximum = 60000, Increment = 500, Width = 120 };
+    private readonly TextBox tbMainHotkey = new() { Width = 300 };
+    private readonly CheckBox cbAllowClip = new() { Text = "Allow clipboard probe when text is selected", AutoSize = true };
+    private readonly CheckBox cbTrayMode = new() { Text = "Start minimized to system tray", AutoSize = true };
+    private readonly NumericUpDown nudTooltipStay = new() { Minimum = 1500, Maximum = 60000, Increment = 500, Width = 100 };
+    private readonly NumericUpDown nudTooltipError = new() { Minimum = 1500, Maximum = 60000, Increment = 500, Width = 100 };
 
     // Prompts & Hotkeys
     private readonly Panel pnlScrollPrompts = new() { Dock = DockStyle.Fill, AutoScroll = true };
@@ -2202,25 +2202,26 @@ public class ConfigForm : Form
     private readonly List<TextBox> tbPromptHotkeys = new();
 
     // LLM
-    private readonly TextBox tbBaseUrl = new() { Dock = DockStyle.Fill };
-    private readonly TextBox tbApiKey = new() { Dock = DockStyle.Fill, UseSystemPasswordChar = true };
-    private readonly TextBox tbModel = new() { Dock = DockStyle.Fill };
-    private readonly TextBox tbCustomHeaders = new() { Multiline = true, ScrollBars = ScrollBars.Vertical, AcceptsReturn = true, Dock = DockStyle.Fill, MinimumSize = new Size(0, 160) };
+    private readonly TextBox tbBaseUrl = new() { Width = 500 };
+    private readonly TextBox tbApiKey = new() { Width = 500, UseSystemPasswordChar = true };
+    private readonly TextBox tbModel = new() { Width = 300 };
+    private readonly TextBox tbCustomHeaders = new() { Multiline = true, ScrollBars = ScrollBars.Vertical, AcceptsReturn = true, Height = 120, Width = 500 };
+    private readonly Button btnShowApiKey = new() { Text = "Show", Width = 80 };
 
     // Network
-    private readonly TextBox tbProxy = new() { Dock = DockStyle.Fill };
-    private readonly NumericUpDown nudTimeout = new() { Width = 120, Minimum = 1, Maximum = 300, DecimalPlaces = 0 };
-    private readonly CheckBox cbSslOff = new() { Text = "Disable SSL verification", AutoSize = true, Anchor = AnchorStyles.Left };
+    private readonly TextBox tbProxy = new() { Width = 400 };
+    private readonly NumericUpDown nudTimeout = new() { Width = 100, Minimum = 1, Maximum = 300, DecimalPlaces = 0 };
+    private readonly CheckBox cbSslOff = new() { Text = "Disable SSL certificate verification (not recommended)", AutoSize = true };
 
-    // Updates (Owner/Repo readonly)
-    private readonly CheckBox cbUpdate = new() { Text = "Check updates on startup" };
-    private readonly Button btnUpdateCheck = new() { Text = "Update Check" };
-    private readonly TextBox tbCurrentVersion = new() { ReadOnly = true, Dock = DockStyle.Fill };
-    private readonly TextBox tbRepoOwner = new() { ReadOnly = true, Dock = DockStyle.Fill };
-    private readonly TextBox tbRepoName = new() { ReadOnly = true, Dock = DockStyle.Fill };
+    // Updates
+    private readonly CheckBox cbUpdate = new() { Text = "Automatically check for updates on startup", AutoSize = true };
+    private readonly Button btnUpdateCheck = new() { Text = "Check Now", Width = 120, Height = 32 };
+    private readonly TextBox tbCurrentVersion = new() { ReadOnly = true, Width = 200, BackColor = SystemColors.Control };
+    private readonly TextBox tbRepoOwner = new() { ReadOnly = true, Width = 200, BackColor = SystemColors.Control };
+    private readonly TextBox tbRepoName = new() { ReadOnly = true, Width = 200, BackColor = SystemColors.Control };
 
-    private readonly Button btnOk = new() { Text = "OK", DialogResult = DialogResult.OK };
-    private readonly Button btnCancel = new() { Text = "Cancel", DialogResult = DialogResult.Cancel };
+    private readonly Button btnOk = new() { Text = "OK", DialogResult = DialogResult.OK, Width = 100, Height = 32 };
+    private readonly Button btnCancel = new() { Text = "Cancel", DialogResult = DialogResult.Cancel, Width = 100, Height = 32 };
 
     private AppConfig _cfg;
 
@@ -2232,8 +2233,8 @@ public class ConfigForm : Form
         FormBorderStyle = FormBorderStyle.Sizable;
         StartPosition = FormStartPosition.CenterParent;
         MaximizeBox = true; MinimizeBox = true;
-        Width = 1200; Height = 900;
-        MinimumSize = new Size(1000, 740);
+        Width = 1200; Height = 960;
+        MinimumSize = new Size(1000, 800);
 
         // Build tabs
         BuildGeneralTab();
@@ -2242,20 +2243,29 @@ public class ConfigForm : Form
         BuildNetworkTab();
         BuildUpdatesTab();
 
-        // Bottom buttons (auto-size so they never get clipped at high DPI)
-        btnOk.AutoSize = true;
-        btnCancel.AutoSize = true;
-        var btnPanel = new FlowLayoutPanel
+        // Bottom buttons panel with improved layout
+        var btnPanel = new Panel
         {
+            Height = 65,
             Dock = DockStyle.Bottom,
-            FlowDirection = FlowDirection.RightToLeft,
-            Padding = new Padding(12),
-            WrapContents = false,
+            BackColor = Color.FromArgb(240, 240, 240)
+        };
+
+        var btnLayout = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Right,
+            FlowDirection = FlowDirection.LeftToRight,
+            Padding = new Padding(16),
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink
         };
-        btnPanel.Controls.Add(btnOk);
-        btnPanel.Controls.Add(btnCancel);
+
+        btnCancel.Margin = new Padding(0, 0, 8, 0);
+        btnOk.Font = new Font("Segoe UI", 9f, FontStyle.Bold);
+
+        btnLayout.Controls.Add(btnCancel);
+        btnLayout.Controls.Add(btnOk);
+        btnPanel.Controls.Add(btnLayout);
 
         // Set default dialog buttons
         this.AcceptButton = btnOk;
@@ -2277,160 +2287,485 @@ public class ConfigForm : Form
 
     private void BuildGeneralTab()
     {
-        var layout = NewTable(2);
-        int row = 0;
+        // Use Panel with AutoScroll for better control
+        var scrollPanel = new Panel
+        {
+            Dock = DockStyle.Fill,
+            AutoScroll = true
+        };
 
-        // Scale label column with DPI to avoid clipping at 125%+
-        var scale = this.DeviceDpi > 0 ? (this.DeviceDpi / 96f) : 1f;
-        int labelCol = (int)Math.Round(160 * scale);
-        layout.ColumnStyles[0] = new ColumnStyle(SizeType.Absolute, labelCol);
+        // Container panel for groups
+        var containerPanel = new Panel
+        {
+            Location = new Point(8, 8),
+            Width = 850,
+            Height = 500
+        };
 
-        AddRow2(layout, ref row, "Main Hotkey:", tbMainHotkey);
-        AddRow2(layout, ref row, "Tooltip Stay (ms):", nudTooltipStay);
-        AddRow2(layout, ref row, "Tooltip Error (ms):", nudTooltipError);
-        // Checkboxes should span both columns so their text never gets clipped by an empty label cell
-        AddRowSpan2(layout, ref row, cbAllowClip);
-        AddRowSpan2(layout, ref row, cbTrayMode);
+        // DPI scale for label column widths
+        float scale = 1f; try { scale = DeviceDpi / 96f; } catch { }
 
-        tabGeneral.Controls.Add(layout);
+        // Hotkey Settings Group
+        var grpHotkey = new GroupBox
+        {
+            Text = "Hotkey Configuration",
+            Location = new Point(0, 0),
+            Width = 850,
+            Height = 100,
+            Padding = new Padding(12),
+            Font = new Font("Segoe UI", 9.5f)
+        };
+
+        var lblMainHotkey = new Label
+        {
+            Text = "Global Hotkey:",
+            Location = new Point(15, 30),
+            AutoSize = true
+        };
+
+        tbMainHotkey.Location = new Point(150, 27);
+        tbMainHotkey.Width = 300;
+
+        var lblHotkeyHelp = new Label
+        {
+            Text = "Example: Ctrl+Shift+Space",
+            Location = new Point(150, 55),
+            AutoSize = true,
+            ForeColor = Color.Gray,
+            Font = new Font("Segoe UI", 8.5f)
+        };
+
+        grpHotkey.Controls.Add(lblMainHotkey);
+        grpHotkey.Controls.Add(tbMainHotkey);
+        grpHotkey.Controls.Add(lblHotkeyHelp);
+
+        // Tooltip Settings Group
+        var grpTooltip = new GroupBox
+        {
+            Text = "Tooltip Display Settings",
+            Location = new Point(0, 110),
+            Width = 850,
+            Height = 120,
+            Padding = new Padding(12),
+            Font = new Font("Segoe UI", 9.5f)
+        };
+
+        var lblStay = new Label
+        {
+            Text = "Normal Display:",
+            Location = new Point(15, 30),
+            AutoSize = true
+        };
+
+        nudTooltipStay.Location = new Point(150, 27);
+
+        var lblStayMs = new Label
+        {
+            Text = "ms",
+            Location = new Point(255, 30),
+            AutoSize = true
+        };
+
+        var lblError = new Label
+        {
+            Text = "Error Display:",
+            Location = new Point(15, 60),
+            AutoSize = true
+        };
+
+        nudTooltipError.Location = new Point(150, 57);
+
+        var lblErrorMs = new Label
+        {
+            Text = "ms",
+            Location = new Point(255, 60),
+            AutoSize = true
+        };
+
+        grpTooltip.Controls.Add(lblStay);
+        grpTooltip.Controls.Add(nudTooltipStay);
+        grpTooltip.Controls.Add(lblStayMs);
+        grpTooltip.Controls.Add(lblError);
+        grpTooltip.Controls.Add(nudTooltipError);
+        grpTooltip.Controls.Add(lblErrorMs);
+
+        // Behavior Settings Group
+        var grpBehavior = new GroupBox
+        {
+            Text = "Application Behavior",
+            Location = new Point(0, 240),
+            Width = 850,
+            Height = 100,
+            Padding = new Padding(12),
+            Font = new Font("Segoe UI", 9.5f)
+        };
+
+        cbAllowClip.Location = new Point(15, 30);
+        cbTrayMode.Location = new Point(15, 60);
+
+        grpBehavior.Controls.Add(cbAllowClip);
+        grpBehavior.Controls.Add(cbTrayMode);
+
+        // Add all groups to container
+        containerPanel.Controls.Add(grpHotkey);
+        containerPanel.Controls.Add(grpTooltip);
+        containerPanel.Controls.Add(grpBehavior);
+
+        scrollPanel.Controls.Add(containerPanel);
+        tabGeneral.Controls.Add(scrollPanel);
     }
 
     private void BuildPromptsTab()
     {
-        var root = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12), ColumnCount = 1 };
-        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-
-        var header = new Label { Text = "Prompts (1..9) and Hotkeys", AutoSize = true, Font = new Font("Segoe UI", 10.5f, FontStyle.Bold) };
-        root.Controls.Add(header, 0, 0);
-
-        var inner = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = false, ColumnCount = 3 };
-        inner.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        inner.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        inner.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        // Simple scrollable panel
+        var scrollPanel = new Panel
+        {
+            Dock = DockStyle.Fill,
+            AutoScroll = true
+        };
 
         var prompts = (_cfg.prompts ?? Array.Empty<string>()).ToArray();
         if (prompts.Length < 9) Array.Resize(ref prompts, 9);
         var hks = (_cfg.prompt_hotkeys ?? Array.Empty<string>()).ToArray();
         if (hks.Length < 9) Array.Resize(ref hks, 9);
 
+        int yPos = 10;
+
         for (int i = 0; i < 9; i++)
         {
-            var lbl = new Label { Text = $"Prompt {i + 1}:", AutoSize = true, Anchor = AnchorStyles.Left, Padding = new Padding(0, 6, 6, 0) };
-            var tbP = new TextBox { Multiline = true, ScrollBars = ScrollBars.Vertical, AcceptsReturn = true, Text = prompts[i] ?? "", Dock = DockStyle.Fill, MinimumSize = new Size(0, 120) };
-            var tbH = new TextBox { Text = hks[i] ?? "", Dock = DockStyle.Fill, MinimumSize = new Size(140, 0) };
+            // Create a panel for each prompt
+            var promptPanel = new Panel
+            {
+                Location = new Point(10, yPos),
+                Width = 850,
+                Height = 120,
+                BorderStyle = BorderStyle.FixedSingle
+            };
+
+            var lblNum = new Label
+            {
+                Text = $"Prompt {i + 1}:",
+                Location = new Point(10, 10),
+                AutoSize = true,
+                Font = new Font("Segoe UI", 9f, FontStyle.Bold)
+            };
+
+            var tbP = new TextBox
+            {
+                Multiline = true,
+                ScrollBars = ScrollBars.Vertical,
+                AcceptsReturn = true,
+                Text = prompts[i] ?? "",
+                Location = new Point(10, 35),
+                Width = 600,
+                Height = 70,
+                Font = new Font("Consolas", 9f)
+            };
+
+            var lblHotkey = new Label
+            {
+                Text = "Hotkey:",
+                Location = new Point(630, 35),
+                AutoSize = true,
+                Font = new Font("Segoe UI", 9f)
+            };
+
+            var tbH = new TextBox
+            {
+                Text = hks[i] ?? "",
+                Location = new Point(630, 60),
+                Width = 200,
+                Font = new Font("Segoe UI", 9f)
+            };
 
             tbPrompts.Add(tbP);
             tbPromptHotkeys.Add(tbH);
 
-            int r = inner.RowCount++;
-            inner.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            inner.Controls.Add(lbl, 0, r);
-            inner.Controls.Add(tbP, 1, r);
-            inner.Controls.Add(tbH, 2, r);
+            promptPanel.Controls.Add(lblNum);
+            promptPanel.Controls.Add(tbP);
+            promptPanel.Controls.Add(lblHotkey);
+            promptPanel.Controls.Add(tbH);
+
+            scrollPanel.Controls.Add(promptPanel);
+
+            yPos += 130;
         }
 
-        pnlScrollPrompts.Controls.Add(inner);
-        root.Controls.Add(pnlScrollPrompts, 0, 1);
-
-        tabPrompts.Controls.Add(root);
+        tabPrompts.Controls.Add(scrollPanel);
     }
 
     private void BuildLLMTab()
     {
-        var layout = NewTable(2);
-        int row = 0;
-        
-        // 레이블 컬럼 너비를 고정하여 정렬 개선
-        // Scale label column width with DPI so text doesn’t clip on 125%+
-        var scale = this.DeviceDpi > 0 ? (this.DeviceDpi / 96f) : 1f;
-        int labelCol = (int)Math.Round(160 * scale);
-        layout.ColumnStyles[0] = new ColumnStyle(SizeType.Absolute, labelCol);
-        
-        AddRow2(layout, ref row, "Base URL:", tbBaseUrl);
-        AddRow2(layout, ref row, "API Key (Bearer):", tbApiKey);
-        AddRow2(layout, ref row, "Model:", tbModel);
-        
-        // Custom Headers: 레이블과 설명을 분리하여 더 깔끔하게
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        var lblHeaders = new Label 
-        { 
-            Text = "Custom Headers:", 
-            AutoSize = true, 
-            Anchor = AnchorStyles.Left | AnchorStyles.Top, 
-            Padding = new Padding(0, 6, 6, 0) 
-        };
-        layout.Controls.Add(lblHeaders, 0, row);
-        
-        var pnlHeaders = new Panel { Dock = DockStyle.Fill };
-        tbCustomHeaders.Dock = DockStyle.Top;
-        tbCustomHeaders.Height = 120;
-        pnlHeaders.Controls.Add(tbCustomHeaders);
-        
-        var lblHeadersDesc = new Label
+        var scrollPanel = new Panel
         {
-            Text = "Format: \"Header: Value\" per line, or JSON object",
+            Dock = DockStyle.Fill,
+            AutoScroll = true
+        };
+
+        var containerPanel = new Panel
+        {
+            Location = new Point(8, 8),
+            Width = 850,
+            Height = 500
+        };
+
+        // API Configuration Group
+        var grpApi = new GroupBox
+        {
+            Text = "API Configuration",
+            Location = new Point(0, 0),
+            Width = 850,
+            Height = 180,
+            Padding = new Padding(12),
+            Font = new Font("Segoe UI", 9.5f)
+        };
+
+        // Base URL
+        var lblBaseUrl = new Label
+        {
+            Text = "Base URL:",
+            Location = new Point(15, 30),
+            AutoSize = true
+        };
+
+        tbBaseUrl.Location = new Point(120, 27);
+
+        // API Key
+        var lblApiKey = new Label
+        {
+            Text = "API Key:",
+            Location = new Point(15, 60),
+            AutoSize = true
+        };
+
+        tbApiKey.Location = new Point(120, 57);
+
+        btnShowApiKey.Location = new Point(625, 56);
+        btnShowApiKey.Click += (_, __) =>
+        {
+            tbApiKey.UseSystemPasswordChar = !tbApiKey.UseSystemPasswordChar;
+            btnShowApiKey.Text = tbApiKey.UseSystemPasswordChar ? "Show" : "Hide";
+        };
+
+        // Model
+        var lblModel = new Label
+        {
+            Text = "Model:",
+            Location = new Point(15, 90),
+            AutoSize = true
+        };
+
+        tbModel.Location = new Point(120, 87);
+
+        grpApi.Controls.Add(lblBaseUrl);
+        grpApi.Controls.Add(tbBaseUrl);
+        grpApi.Controls.Add(lblApiKey);
+        grpApi.Controls.Add(tbApiKey);
+        grpApi.Controls.Add(btnShowApiKey);
+        grpApi.Controls.Add(lblModel);
+        grpApi.Controls.Add(tbModel);
+
+        // Custom Headers Group
+        var grpHeaders = new GroupBox
+        {
+            Text = "Custom Headers (Optional)",
+            Location = new Point(0, 190),
+            Width = 850,
+            Height = 180,
+            Padding = new Padding(12),
+            Font = new Font("Segoe UI", 9.5f)
+        };
+
+        var lblHeadersHelp = new Label
+        {
+            Text = "Enter custom headers as JSON object or \"Header: Value\" format (one per line)",
+            Location = new Point(15, 25),
             AutoSize = true,
             ForeColor = Color.Gray,
-            Font = new Font("Segoe UI", 8.5f),
-            Padding = new Padding(0, 4, 0, 0),
-            Dock = DockStyle.Top
+            Font = new Font("Segoe UI", 8.5f)
         };
-        pnlHeaders.Controls.Add(lblHeadersDesc);
-        pnlHeaders.Controls.SetChildIndex(lblHeadersDesc, 0);
-        pnlHeaders.Controls.SetChildIndex(tbCustomHeaders, 1);
-        
-        layout.Controls.Add(pnlHeaders, 1, row);
-        row++;
-        
-        tabLLM.Controls.Add(layout);
+
+        tbCustomHeaders.Location = new Point(15, 45);
+        tbCustomHeaders.Font = new Font("Consolas", 9f);
+
+        grpHeaders.Controls.Add(lblHeadersHelp);
+        grpHeaders.Controls.Add(tbCustomHeaders);
+
+        containerPanel.Controls.Add(grpApi);
+        containerPanel.Controls.Add(grpHeaders);
+
+        scrollPanel.Controls.Add(containerPanel);
+        tabLLM.Controls.Add(scrollPanel);
     }
 
     private void BuildNetworkTab()
     {
-        var layout = NewTable(2);
-        int row = 0;
+        var scrollPanel = new Panel
+        {
+            Dock = DockStyle.Fill,
+            AutoScroll = true
+        };
 
-        // DPI-scaled label column to avoid truncation at 125%+
-        var scale = this.DeviceDpi > 0 ? (this.DeviceDpi / 96f) : 1f;
-        int labelCol = (int)Math.Round(160 * scale);
-        layout.ColumnStyles[0] = new ColumnStyle(SizeType.Absolute, labelCol);
+        var containerPanel = new Panel
+        {
+            Location = new Point(8, 8),
+            Width = 850,
+            Height = 400
+        };
 
-        AddRow2(layout, ref row, "HTTP Proxy:", tbProxy);
-        AddRow2(layout, ref row, "Request Timeout (seconds):", nudTimeout);
-        // Checkbox should span both columns so its caption never clips
-        AddRowSpan2(layout, ref row, cbSslOff);
-        tabNetwork.Controls.Add(layout);
+        // Network Settings Group
+        var grpNetwork = new GroupBox
+        {
+            Text = "Network Configuration",
+            Location = new Point(0, 0),
+            Width = 850,
+            Height = 150,
+            Padding = new Padding(12),
+            Font = new Font("Segoe UI", 9.5f)
+        };
+
+        // HTTP Proxy
+        var lblProxy = new Label
+        {
+            Text = "HTTP Proxy:",
+            Location = new Point(15, 30),
+            AutoSize = true
+        };
+
+        tbProxy.Location = new Point(150, 27);
+
+        var lblProxyHelp = new Label
+        {
+            Text = "Format: http://proxy:port",
+            Location = new Point(555, 30),
+            AutoSize = true,
+            ForeColor = Color.Gray,
+            Font = new Font("Segoe UI", 8.5f)
+        };
+
+        // Timeout
+        var lblTimeout = new Label
+        {
+            Text = "Request Timeout:",
+            Location = new Point(15, 60),
+            AutoSize = true
+        };
+
+        nudTimeout.Location = new Point(150, 57);
+
+        var lblTimeoutUnit = new Label
+        {
+            Text = "seconds",
+            Location = new Point(255, 60),
+            AutoSize = true
+        };
+
+        // SSL checkbox
+        cbSslOff.Location = new Point(15, 90);
+
+        grpNetwork.Controls.Add(lblProxy);
+        grpNetwork.Controls.Add(tbProxy);
+        grpNetwork.Controls.Add(lblProxyHelp);
+        grpNetwork.Controls.Add(lblTimeout);
+        grpNetwork.Controls.Add(nudTimeout);
+        grpNetwork.Controls.Add(lblTimeoutUnit);
+        grpNetwork.Controls.Add(cbSslOff);
+
+        containerPanel.Controls.Add(grpNetwork);
+
+        scrollPanel.Controls.Add(containerPanel);
+        tabNetwork.Controls.Add(scrollPanel);
     }
 
     private void BuildUpdatesTab()
     {
-        var layout = NewTable(2);
-        int row = 0;
+        var scrollPanel = new Panel
+        {
+            Dock = DockStyle.Fill,
+            AutoScroll = true
+        };
 
-        // DPI-scaled label column width
-        var scale = this.DeviceDpi > 0 ? (this.DeviceDpi / 96f) : 1f;
-        int labelCol = (int)Math.Round(160 * scale);
-        layout.ColumnStyles[0] = new ColumnStyle(SizeType.Absolute, labelCol);
+        var containerPanel = new Panel
+        {
+            Location = new Point(8, 8),
+            Width = 850,
+            Height = 400
+        };
 
-        // Top action row: Update Check button aligned left, spans both columns
-        btnUpdateCheck.AutoSize = true;
+        // Update Actions Group
+        var grpActions = new GroupBox
+        {
+            Text = "Update Management",
+            Location = new Point(0, 0),
+            Width = 850,
+            Height = 100,
+            Padding = new Padding(12),
+            Font = new Font("Segoe UI", 9.5f)
+        };
+
+        btnUpdateCheck.Location = new Point(15, 30);
+        btnUpdateCheck.Font = new Font("Segoe UI", 9.5f);
+        btnUpdateCheck.ForeColor = Color.FromArgb(0, 100, 200);
         btnUpdateCheck.Click += async (_, __) => { try { await App.ManualCheckUpdateFromSettingsAsync(); } catch { } };
-        AddRowSpan2(layout, ref row, btnUpdateCheck);
 
-        // Option: check on startup
-        AddRowSpan2(layout, ref row, cbUpdate);
+        cbUpdate.Location = new Point(15, 65);
 
-        // Current version (read-only)
-        AddRow2(layout, ref row, "Current Version:", tbCurrentVersion);
+        grpActions.Controls.Add(btnUpdateCheck);
+        grpActions.Controls.Add(cbUpdate);
 
-        // Read-only owner/repo (read-only, aligned)
-        AddRow2(layout, ref row, "Repo Owner:", tbRepoOwner);
-        AddRow2(layout, ref row, "Repo Name:", tbRepoName);
+        // Version Information Group
+        var grpVersion = new GroupBox
+        {
+            Text = "Version Information",
+            Location = new Point(0, 110),
+            Width = 850,
+            Height = 130,
+            Padding = new Padding(12),
+            Font = new Font("Segoe UI", 9.5f)
+        };
 
-        // Removed verbose English tip per request
+        var lblCurrentVersion = new Label
+        {
+            Text = "Current Version:",
+            Location = new Point(15, 30),
+            AutoSize = true
+        };
 
-        tabUpdates.Controls.Add(layout);
+        tbCurrentVersion.Location = new Point(150, 27);
+        tbCurrentVersion.Font = new Font("Segoe UI", 9f);
+
+        var lblRepoOwner = new Label
+        {
+            Text = "Repository Owner:",
+            Location = new Point(15, 60),
+            AutoSize = true
+        };
+
+        tbRepoOwner.Location = new Point(150, 57);
+        tbRepoOwner.Font = new Font("Segoe UI", 9f);
+
+        var lblRepoName = new Label
+        {
+            Text = "Repository Name:",
+            Location = new Point(15, 90),
+            AutoSize = true
+        };
+
+        tbRepoName.Location = new Point(150, 87);
+        tbRepoName.Font = new Font("Segoe UI", 9f);
+
+        grpVersion.Controls.Add(lblCurrentVersion);
+        grpVersion.Controls.Add(tbCurrentVersion);
+        grpVersion.Controls.Add(lblRepoOwner);
+        grpVersion.Controls.Add(tbRepoOwner);
+        grpVersion.Controls.Add(lblRepoName);
+        grpVersion.Controls.Add(tbRepoName);
+
+        containerPanel.Controls.Add(grpActions);
+        containerPanel.Controls.Add(grpVersion);
+
+        scrollPanel.Controls.Add(containerPanel);
+        tabUpdates.Controls.Add(scrollPanel);
     }
 
     private static TableLayoutPanel NewTable(int cols)
