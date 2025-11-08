@@ -1923,13 +1923,14 @@ public static class App
         catch (OperationCanceledException) when (outerCt.IsCancellationRequested) { throw; }
         catch (Exception ex) { Logger.Warn("Win32 stage exception: " + ex.Message); }
 
-        if (cfg.AllowClipboardProbe)
+        // Always try clipboard probe if FlaUI and Win32 methods failed
+        // This ensures drag-selected text is captured even if AllowClipboardProbe is disabled
+        // (AllowClipboardProbe only affects whether we probe when there's already text selected)
+        try
         {
-            try
-            {
-                using var cts = CancellationTokenSource.CreateLinkedTokenSource(outerCt);
-                cts.CancelAfter(600);
-                string? probed = await RunOnStaAsync<string?>(() =>
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(outerCt);
+            cts.CancelAfter(600);
+            string? probed = await RunOnStaAsync<string?>(() =>
                 {
                     string? original = null;
                     try { if (Clipboard.ContainsText()) original = Clipboard.GetText(TextDataFormat.UnicodeText); } catch { }
@@ -1956,10 +1957,9 @@ public static class App
                     return null;
                 }, TimeSpan.FromMilliseconds(600), cts.Token).ConfigureAwait(false);
                 if (!string.IsNullOrWhiteSpace(probed)) return probed;
-            }
-            catch (OperationCanceledException) when (outerCt.IsCancellationRequested) { throw; }
-            catch (Exception ex) { Logger.Warn("Probe stage exception: " + ex.Message); }
         }
+        catch (OperationCanceledException) when (outerCt.IsCancellationRequested) { throw; }
+        catch (Exception ex) { Logger.Warn("Probe stage exception: " + ex.Message); }
 
         try
         {
@@ -2274,7 +2274,7 @@ public class ConfigForm : Form
         // Bottom buttons panel with improved layout
         var btnPanel = new Panel
         {
-            Height = 65,
+            Height = 50,
             Dock = DockStyle.Bottom,
             BackColor = Color.FromArgb(240, 240, 240)
         };
@@ -2283,7 +2283,7 @@ public class ConfigForm : Form
         {
             Dock = DockStyle.Right,
             FlowDirection = FlowDirection.LeftToRight,
-            Padding = new Padding(16),
+            Padding = new Padding(10),
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink
         };
@@ -2469,10 +2469,10 @@ public class ConfigForm : Form
                 ColumnCount = 2,
                 RowCount = 2
             };
-            tblPrompt.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 70));
-            tblPrompt.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 30));
+            tblPrompt.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 75));
+            tblPrompt.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
             tblPrompt.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            tblPrompt.RowStyles.Add(new RowStyle(SizeType.Absolute, 90));
+            tblPrompt.RowStyles.Add(new RowStyle(SizeType.Absolute, 150));
 
             tblPrompt.Controls.Add(new Label { Text = "Prompt Text:", AutoSize = true, Margin = new Padding(3) }, 0, 0);
             tblPrompt.Controls.Add(new Label { Text = "Hotkey:", AutoSize = true, Margin = new Padding(3) }, 1, 0);
