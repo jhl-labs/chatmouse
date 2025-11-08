@@ -38,10 +38,25 @@ using WinFormsApp = System.Windows.Forms.Application;
 
 #region Models
 
-public class ChatMessage { public string role { get; set; } = ""; public string content { get; set; } = ""; }
-public class ChatRequest { public string model { get; set; } = ""; public ChatMessage[] messages { get; set; } = Array.Empty<ChatMessage>(); public double temperature { get; set; } = 0.7; }
-public class ChatChoice { public ChatMessage message { get; set; } = new ChatMessage(); }
-public class ChatResponse { public ChatChoice[] choices { get; set; } = Array.Empty<ChatChoice>(); }
+public class ChatMessage
+{
+    [JsonPropertyName("role")] public string Role { get; set; } = string.Empty;
+    [JsonPropertyName("content")] public string Content { get; set; } = string.Empty;
+}
+public class ChatRequest
+{
+    [JsonPropertyName("model")] public string Model { get; set; } = string.Empty;
+    [JsonPropertyName("messages")] public ChatMessage[] Messages { get; set; } = Array.Empty<ChatMessage>();
+    [JsonPropertyName("temperature")] public double Temperature { get; set; } = 0.7;
+}
+public class ChatChoice
+{
+    [JsonPropertyName("message")] public ChatMessage Message { get; set; } = new ChatMessage();
+}
+public class ChatResponse
+{
+    [JsonPropertyName("choices")] public ChatChoice[] Choices { get; set; } = Array.Empty<ChatChoice>();
+}
 
 #endregion
 
@@ -431,11 +446,24 @@ public class PrettyTooltipForm : Form
         { gp.AddRectangle(new Rectangle(0, 0, size.Width, size.Height)); Region = new Region(gp); }
 
         Rectangle workArea = Screen.FromPoint(anchor).WorkingArea;
-        int x = anchor.X + SpawnOffset, y = anchor.Y + SpawnOffset;
+        int x = anchor.X + SpawnOffset;
+        int y = anchor.Y + SpawnOffset;
+
+        // Adjust X position if tooltip goes off-screen horizontally
         if (x + size.Width > workArea.Right) x = workArea.Right - size.Width - SpawnOffset;
-        if (y + size.Height > workArea.Bottom) y = workArea.Bottom - SpawnOffset;
         if (x < workArea.Left) x = workArea.Left + SpawnOffset;
+
+        // Adjust Y position if tooltip goes off-screen vertically
+        // Instead of moving to bottom, show above the anchor point
+        if (y + size.Height > workArea.Bottom)
+        {
+            // Try to show above the anchor
+            y = anchor.Y - size.Height - SpawnOffset;
+            // If still doesn't fit, clamp to workArea
+            if (y < workArea.Top) y = workArea.Top + SpawnOffset;
+        }
         if (y < workArea.Top) y = workArea.Top + SpawnOffset;
+
         var final = new Point(x, y);
         Location = final;
 
@@ -499,33 +527,33 @@ public class PrettyTooltipForm : Form
 
 public class AppConfig
 {
-    public string base_url { get; set; } = "";
-    public string api_key { get; set; } = "";
-    public string model { get; set; } = "";
+    [JsonPropertyName("base_url")] public string BaseUrl { get; set; } = string.Empty;
+    [JsonPropertyName("api_key")] public string ApiKey { get; set; } = string.Empty;
+    [JsonPropertyName("model")] public string Model { get; set; } = string.Empty;
 
-    public string prompt { get; set; } = "";                // legacy 1st prompt
-    public string[] prompts { get; set; } = Array.Empty<string>();
-    public string[] prompt_hotkeys { get; set; } = Array.Empty<string>();
+    [JsonPropertyName("prompt")] public string Prompt { get; set; } = string.Empty; // legacy 1st prompt
+    [JsonPropertyName("prompts")] public string[] Prompts { get; set; } = Array.Empty<string>();
+    [JsonPropertyName("prompt_hotkeys")] public string[] PromptHotkeys { get; set; } = Array.Empty<string>();
 
-    public bool allow_clipboard_probe { get; set; } = true;
-    public string? http_proxy { get; set; }
-    public bool disable_ssl_verify { get; set; } = false;
+    [JsonPropertyName("allow_clipboard_probe")] public bool AllowClipboardProbe { get; set; } = true;
+    [JsonPropertyName("http_proxy")] public string? HttpProxy { get; set; }
+    [JsonPropertyName("disable_ssl_verify")] public bool DisableSslVerify { get; set; } = false;
 
-    public bool tray_mode { get; set; } = true;
-    public string hotkey { get; set; } = "Ctrl+Shift+Space";
-    public int request_timeout_seconds { get; set; } = 10;
+    [JsonPropertyName("tray_mode")] public bool TrayMode { get; set; } = true;
+    [JsonPropertyName("hotkey")] public string Hotkey { get; set; } = "Ctrl+Shift+Space";
+    [JsonPropertyName("request_timeout_seconds")] public int RequestTimeoutSeconds { get; set; } = 10;
 
-    public int tooltip_stay_ms { get; set; } = 6000;  // 일반 유지시간
-    public int tooltip_error_ms { get; set; } = 3500; // 에러 표시 후 자동 닫힘
+    [JsonPropertyName("tooltip_stay_ms")] public int TooltipStayMs { get; set; } = 6000;  // 일반 유지시간
+    [JsonPropertyName("tooltip_error_ms")] public int TooltipErrorMs { get; set; } = 3500; // 에러 표시 후 자동 닫힘
 
     // LLM custom headers: "Header: Value" per line in UI
-    public string[] llm_custom_headers { get; set; } = Array.Empty<string>();
+    [JsonPropertyName("llm_custom_headers")] public string[] LlmCustomHeaders { get; set; } = Array.Empty<string>();
 
     // ===== Update checker config =====
-    public bool update_check_enabled { get; set; } = true;
-    public string update_repo_owner { get; set; } = "qmoix";
-    public string update_repo_name { get; set; } = "chatmouse";
-    public string? last_notified_version { get; set; }
+    [JsonPropertyName("update_check_enabled")] public bool UpdateCheckEnabled { get; set; } = true;
+    [JsonPropertyName("update_repo_owner")] public string UpdateRepoOwner { get; set; } = "qmoix";
+    [JsonPropertyName("update_repo_name")] public string UpdateRepoName { get; set; } = "chatmouse";
+    [JsonPropertyName("last_notified_version")] public string? LastNotifiedVersion { get; set; }
 }
 
 #endregion
@@ -608,7 +636,7 @@ public static class App
 
             var cfg = LoadConfigWithEnvOverrides();
             _cfgCurrent = cfg;
-            Logger.Info($"Config loaded. tray_mode={cfg.tray_mode}, hotkey={cfg.hotkey}, base_url={cfg.base_url}, model={cfg.model}, proxy={(cfg.http_proxy ?? "null")}, ssl_off={cfg.disable_ssl_verify}, tooltip_stay_ms={cfg.tooltip_stay_ms}, tooltip_error_ms={cfg.tooltip_error_ms}");
+            Logger.Info($"Config loaded. tray_mode={cfg.TrayMode}, hotkey={cfg.Hotkey}, base_url={cfg.BaseUrl}, model={cfg.Model}, proxy={(cfg.HttpProxy ?? "null")}, ssl_off={cfg.DisableSslVerify}, tooltip_stay_ms={cfg.TooltipStayMs}, tooltip_error_ms={cfg.TooltipErrorMs}");
 
             _httpGlobal = CreateHttp(cfg);
             StartConfigWatcher();
@@ -627,7 +655,7 @@ public static class App
             };
 
             // Update check on startup
-            if (cfg.update_check_enabled)
+            if (cfg.UpdateCheckEnabled)
             {
                 _ = Task.Run(async () =>
                 {
@@ -636,7 +664,7 @@ public static class App
                 });
             }
 
-            if (cfg.tray_mode)
+            if (cfg.TrayMode)
             {
                 Logger.Info("Entering tray mode...");
                 WinFormsApp.Run(new TrayContext(cfg, _httpGlobal!));
@@ -782,7 +810,7 @@ public static class App
             _uiCtx = SynchronizationContext.Current ?? new SynchronizationContext();
 
             var menu = new ContextMenuStrip();
-            _miShow = new ToolStripMenuItem("Show ( " + (_cfg.hotkey) + " )");
+            _miShow = new ToolStripMenuItem("Show ( " + (_cfg.Hotkey) + " )");
             _miShow.Click += (_, __) => TriggerWithHwnd(IntPtr.Zero, forcedPrompt: null);
 
             var miCheckUpdate = new ToolStripMenuItem("Check for updates…");
@@ -868,8 +896,8 @@ public static class App
                 _uiCtx.Post(_ =>
                 {
                     // Decide whether hotkey re-registration is actually needed
-                    string oldMain = _cfg.hotkey ?? string.Empty;
-                    string newMain = newCfg.hotkey ?? string.Empty;
+                    string oldMain = _cfg.Hotkey ?? string.Empty;
+                    string newMain = newCfg.Hotkey ?? string.Empty;
 
                     bool TryNorm(string s, out string norm)
                     {
@@ -911,7 +939,7 @@ public static class App
                     _http = App._httpGlobal ?? App.CreateHttp(newCfg);
 
                     if (_miShow != null)
-                        _miShow.Text = "Show ( " + _cfg.hotkey + " )";
+                        _miShow.Text = "Show ( " + _cfg.Hotkey + " )";
 
                     if (hotkeysChanged)
                     {
@@ -972,9 +1000,9 @@ public static class App
             int success = 0, fail = 0;
             var failures = new List<string>();
 
-            if (TryRegisterComboUnique(HotkeyMainId, cfg.hotkey, out _, out string errMain))
+            if (TryRegisterComboUnique(HotkeyMainId, cfg.Hotkey, out _, out string errMain))
                 success++;
-            else { fail++; failures.Add($"Main:{cfg.hotkey} ({errMain})"); }
+            else { fail++; failures.Add($"Main:{cfg.Hotkey} ({errMain})"); }
 
             var ph = NormalizePromptHotkeys(cfg);
             for (int i = 0; i < 9; i++)
@@ -1097,7 +1125,7 @@ public static class App
             if (newer)
             {
                 ShowReleaseNotesDialog(latest, isManual: true);
-                cfg.last_notified_version = latest.Tag;
+                cfg.LastNotifiedVersion = latest.Tag;
                 App.SaveConfig(cfg);
             }
             else
@@ -1264,7 +1292,7 @@ public static class App
         await WaitForModifiersReleasedAsync(TimeSpan.FromMilliseconds(250));
 
         Point anchor = TryGetCaretOrCursorAnchor(hwndAtPress);
-                var tooltip = new PrettyTooltipForm("⏳ 선택 텍스트 확인 중…", cfg.tooltip_stay_ms, anchor);
+                var tooltip = new PrettyTooltipForm("⏳ 선택 텍스트 확인 중…", cfg.TooltipStayMs, anchor);
 
         var cts = CancellationTokenSource.CreateLinkedTokenSource(externalCt);
         tooltip.FormClosed += (_, __) => { try { cts.Cancel(); cts.Dispose(); } catch { } };
@@ -1309,7 +1337,7 @@ public static class App
                     tooltip.BeginInvoke(new Action(() =>
                     {
                         tooltip.MarkLlmInFlight(false);
-                        tooltip.ShowErrorThenAutoClose("⏹️ 취소됨", cfg.tooltip_error_ms);
+                        tooltip.ShowErrorThenAutoClose("⏹️ 취소됨", cfg.TooltipErrorMs);
                     }));
                 }
                 return;
@@ -1322,7 +1350,7 @@ public static class App
                     tooltip.BeginInvoke(new Action(() =>
                     {
                         tooltip.MarkLlmInFlight(false);
-                        tooltip.ShowErrorThenAutoClose("⚠️ Disposed", cfg.tooltip_error_ms);
+                        tooltip.ShowErrorThenAutoClose("⚠️ Disposed", cfg.TooltipErrorMs);
                     }));
                 }
                 return;
@@ -1335,7 +1363,7 @@ public static class App
                     tooltip.BeginInvoke(new Action(() =>
                     {
                         tooltip.MarkLlmInFlight(false);
-                        tooltip.ShowErrorThenAutoClose($"❌ Error: {ex.Message}", cfg.tooltip_error_ms);
+                        tooltip.ShowErrorThenAutoClose($"❌ Error: {ex.Message}", cfg.TooltipErrorMs);
                     }));
                 }
             }
@@ -1347,12 +1375,12 @@ public static class App
 
     private static string[] NormalizePrompts(AppConfig cfg)
     {
-        var arr = (cfg.prompts ?? Array.Empty<string>()).ToArray();
+        var arr = (cfg.Prompts ?? Array.Empty<string>()).ToArray();
         if (arr.Length < 9) Array.Resize(ref arr, 9);
-        if ((arr.Length == 0 || string.IsNullOrWhiteSpace(arr[0])) && !string.IsNullOrWhiteSpace(cfg.prompt))
+        if ((arr.Length == 0 || string.IsNullOrWhiteSpace(arr[0])) && !string.IsNullOrWhiteSpace(cfg.Prompt))
         {
             if (arr.Length == 0) Array.Resize(ref arr, 9);
-            arr[0] = cfg.prompt;
+            arr[0] = cfg.Prompt;
         }
         if (string.IsNullOrWhiteSpace(arr[0])) arr[0] = "다음 텍스트를 요약해줘:";
         return arr.Select(s => s ?? string.Empty).ToArray();
@@ -1360,7 +1388,7 @@ public static class App
 
     private static string[] NormalizePromptHotkeys(AppConfig cfg)
     {
-        var arr = (cfg.prompt_hotkeys ?? Array.Empty<string>()).ToArray();
+        var arr = (cfg.PromptHotkeys ?? Array.Empty<string>()).ToArray();
         if (arr.Length < 9) Array.Resize(ref arr, 9);
         for (int i = 0; i < 9; i++)
             if (string.IsNullOrWhiteSpace(arr[i])) arr[i] = "";
@@ -1374,9 +1402,9 @@ public static class App
     private static HttpClient CreateHttp(AppConfig cfg)
     {
         var handler = new HttpClientHandler();
-        if (!string.IsNullOrWhiteSpace(cfg.http_proxy)) { handler.Proxy = new WebProxy(cfg.http_proxy); handler.UseProxy = true; Logger.Info($"Proxy enabled: {cfg.http_proxy}"); }
-        if (cfg.disable_ssl_verify) { handler.ServerCertificateCustomValidationCallback = static (_, __, ___, ____) => true; Logger.Warn("SSL verification disabled"); }
-        int timeoutSeconds = cfg.request_timeout_seconds > 0 ? cfg.request_timeout_seconds : 10;
+        if (!string.IsNullOrWhiteSpace(cfg.HttpProxy)) { handler.Proxy = new WebProxy(cfg.HttpProxy); handler.UseProxy = true; Logger.Info($"Proxy enabled: {cfg.HttpProxy}"); }
+        if (cfg.DisableSslVerify) { handler.ServerCertificateCustomValidationCallback = static (_, __, ___, ____) => true; Logger.Warn("SSL verification disabled"); }
+        int timeoutSeconds = cfg.RequestTimeoutSeconds > 0 ? cfg.RequestTimeoutSeconds : 10;
         return new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(timeoutSeconds) };
     }
 
@@ -1387,8 +1415,8 @@ public static class App
         // Environment overrides for update repo owner/name
         string? envOwner = "jong-hun-lee";
         string? envRepo = "chatmouse";
-        if (!string.IsNullOrWhiteSpace(envOwner)) cfg.update_repo_owner = envOwner.Trim();
-        if (!string.IsNullOrWhiteSpace(envRepo))  cfg.update_repo_name  = envRepo.Trim();
+        if (!string.IsNullOrWhiteSpace(envOwner)) cfg.UpdateRepoOwner = envOwner.Trim();
+        if (!string.IsNullOrWhiteSpace(envRepo))  cfg.UpdateRepoName  = envRepo.Trim();
 
         return cfg;
     }
@@ -1401,11 +1429,11 @@ public static class App
         {
             var sample = new AppConfig
             {
-                base_url = "http://127.0.0.1:8000/v1",
-                api_key = "EMPTY",
-                model = "my-vllm-model",
-                prompt = "다음 텍스트를 요약해줘:",
-                prompts = new[]
+                BaseUrl = "http://127.0.0.1:8000/v1",
+                ApiKey = "EMPTY",
+                Model = "my-vllm-model",
+                Prompt = "다음 텍스트를 요약해줘:",
+                Prompts = new[]
                 {
                     "다음 텍스트를 요약해줘:",           // 1
                     "다음 텍스트의 핵심 bullet 5개:",    // 2
@@ -1414,22 +1442,22 @@ public static class App
                     "To-do 항목으로 뽑아줘:",            // 5
                     "", "", "", ""                       // 6~9
                 },
-                prompt_hotkeys = new[] { "", "", "", "", "", "", "", "", "" },
-                allow_clipboard_probe = true,
-                http_proxy = null,
-                disable_ssl_verify = false,
-                tray_mode = true,
-                hotkey = "Ctrl+Shift+Space",
-                request_timeout_seconds = 10,
+                PromptHotkeys = new[] { "", "", "", "", "", "", "", "", "" },
+                AllowClipboardProbe = true,
+                HttpProxy = null,
+                DisableSslVerify = false,
+                TrayMode = true,
+                Hotkey = "Ctrl+Shift+Space",
+                RequestTimeoutSeconds = 10,
 
-                tooltip_stay_ms = 6000,
-                tooltip_error_ms = 3500,
-                llm_custom_headers = Array.Empty<string>(),
+                TooltipStayMs = 6000,
+                TooltipErrorMs = 3500,
+                LlmCustomHeaders = Array.Empty<string>(),
 
-                update_check_enabled = true,
-                update_repo_owner = "qmoix",
-                update_repo_name = "chatmouse",
-                last_notified_version = null
+                UpdateCheckEnabled = true,
+                UpdateRepoOwner = "qmoix",
+                UpdateRepoName = "chatmouse",
+                LastNotifiedVersion = null
             };
             string json = JsonSerializer.Serialize(sample, JsonOpts);
             File.WriteAllText(ConfigPath, json, new UTF8Encoding(false));
@@ -1442,31 +1470,31 @@ public static class App
 
         bool changed = false;
 
-        if (string.IsNullOrWhiteSpace(cfg.base_url)) { cfg.base_url = "http://127.0.0.1:8000/v1"; changed = true; }
-        if (string.IsNullOrWhiteSpace(cfg.api_key)) { cfg.api_key = "EMPTY"; changed = true; }
-        if (string.IsNullOrWhiteSpace(cfg.model))   { cfg.model = "my-vllm-model"; changed = true; }
+        if (string.IsNullOrWhiteSpace(cfg.BaseUrl)) { cfg.BaseUrl = "http://127.0.0.1:8000/v1"; changed = true; }
+        if (string.IsNullOrWhiteSpace(cfg.ApiKey)) { cfg.ApiKey = "EMPTY"; changed = true; }
+        if (string.IsNullOrWhiteSpace(cfg.Model))   { cfg.Model = "my-vllm-model"; changed = true; }
 
-        var prompts = cfg.prompts ?? Array.Empty<string>();
-        if (prompts.Length < 9) { Array.Resize(ref prompts, 9); cfg.prompts = prompts; changed = true; }
-        if (!string.IsNullOrWhiteSpace(cfg.prompt) && string.IsNullOrWhiteSpace(cfg.prompts[0])) { cfg.prompts[0] = cfg.prompt; changed = true; }
-        if (string.IsNullOrWhiteSpace(cfg.prompts[0])) { cfg.prompts[0] = "다음 텍스트를 요약해줘:"; changed = true; }
+        var prompts = cfg.Prompts ?? Array.Empty<string>();
+        if (prompts.Length < 9) { Array.Resize(ref prompts, 9); cfg.Prompts = prompts; changed = true; }
+        if (!string.IsNullOrWhiteSpace(cfg.Prompt) && string.IsNullOrWhiteSpace(cfg.Prompts[0])) { cfg.Prompts[0] = cfg.Prompt; changed = true; }
+        if (string.IsNullOrWhiteSpace(cfg.Prompts[0])) { cfg.Prompts[0] = "다음 텍스트를 요약해줘:"; changed = true; }
 
-        var ph = cfg.prompt_hotkeys ?? Array.Empty<string>();
-        if (ph.Length < 9) { Array.Resize(ref ph, 9); cfg.prompt_hotkeys = ph; changed = true; }
+        var ph = cfg.PromptHotkeys ?? Array.Empty<string>();
+        if (ph.Length < 9) { Array.Resize(ref ph, 9); cfg.PromptHotkeys = ph; changed = true; }
 
-        if (string.IsNullOrWhiteSpace(cfg.hotkey))  { cfg.hotkey = "Ctrl+Shift+Space"; changed = true; }
-        if (cfg.request_timeout_seconds <= 0) { cfg.request_timeout_seconds = 10; changed = true; }
-        if (!raw.Contains("\"tray_mode\"")) { cfg.tray_mode = true; changed = true; }
+        if (string.IsNullOrWhiteSpace(cfg.Hotkey))  { cfg.Hotkey = "Ctrl+Shift+Space"; changed = true; }
+        if (cfg.RequestTimeoutSeconds <= 0) { cfg.RequestTimeoutSeconds = 10; changed = true; }
+        if (!raw.Contains("\"tray_mode\"")) { cfg.TrayMode = true; changed = true; }
 
-        if (cfg.prompt != (cfg.prompts[0] ?? "")) { cfg.prompt = cfg.prompts[0] ?? ""; changed = true; }
+        if (cfg.Prompt != (cfg.Prompts[0] ?? "")) { cfg.Prompt = cfg.Prompts[0] ?? ""; changed = true; }
 
-        if (!raw.Contains("\"tooltip_stay_ms\"")) { cfg.tooltip_stay_ms = 6000; changed = true; }
-        if (!raw.Contains("\"tooltip_error_ms\"")) { cfg.tooltip_error_ms = 3500; changed = true; }
-        if (cfg.llm_custom_headers == null) { cfg.llm_custom_headers = Array.Empty<string>(); changed = true; }
+        if (!raw.Contains("\"tooltip_stay_ms\"")) { cfg.TooltipStayMs = 6000; changed = true; }
+        if (!raw.Contains("\"tooltip_error_ms\"")) { cfg.TooltipErrorMs = 3500; changed = true; }
+        if (cfg.LlmCustomHeaders == null) { cfg.LlmCustomHeaders = Array.Empty<string>(); changed = true; }
 
-        if (!raw.Contains("\"update_check_enabled\"")) { cfg.update_check_enabled = true; changed = true; }
-        if (string.IsNullOrWhiteSpace(cfg.update_repo_owner)) { cfg.update_repo_owner = "qmoix"; changed = true; }
-        if (string.IsNullOrWhiteSpace(cfg.update_repo_name)) { cfg.update_repo_name = "chatmouse"; changed = true; }
+        if (!raw.Contains("\"update_check_enabled\"")) { cfg.UpdateCheckEnabled = true; changed = true; }
+        if (string.IsNullOrWhiteSpace(cfg.UpdateRepoOwner)) { cfg.UpdateRepoOwner = "qmoix"; changed = true; }
+        if (string.IsNullOrWhiteSpace(cfg.UpdateRepoName)) { cfg.UpdateRepoName = "chatmouse"; changed = true; }
 
         if (changed)
         {
@@ -1545,17 +1573,17 @@ public static class App
                 if (!string.IsNullOrEmpty(dir))
                     Directory.CreateDirectory(dir);
 
-                var normP = (cfg.prompts ?? Array.Empty<string>()).ToArray();
+                var normP = (cfg.Prompts ?? Array.Empty<string>()).ToArray();
                 if (normP.Length < 9) Array.Resize(ref normP, 9);
-                cfg.prompts = normP;
+                cfg.Prompts = normP;
 
-                var normH = (cfg.prompt_hotkeys ?? Array.Empty<string>()).ToArray();
+                var normH = (cfg.PromptHotkeys ?? Array.Empty<string>()).ToArray();
                 if (normH.Length < 9) Array.Resize(ref normH, 9);
-                cfg.prompt_hotkeys = normH;
+                cfg.PromptHotkeys = normH;
 
-                cfg.prompt = cfg.prompts[0] ?? "";
-                if (cfg.tooltip_stay_ms < 1500) cfg.tooltip_stay_ms = 1500;
-                if (cfg.tooltip_error_ms < 1500) cfg.tooltip_error_ms = 1500;
+                cfg.Prompt = cfg.Prompts[0] ?? "";
+                if (cfg.TooltipStayMs < 1500) cfg.TooltipStayMs = 1500;
+                if (cfg.TooltipErrorMs < 1500) cfg.TooltipErrorMs = 1500;
 
                 File.WriteAllText(ConfigPath, JsonSerializer.Serialize(cfg, JsonOpts), new UTF8Encoding(false));
                 _cfgCurrent = cfg;
@@ -1628,16 +1656,16 @@ public static class App
 
     private static async Task<string> QueryLLMAsync(HttpClient http, AppConfig cfg, string prompt, string userText, CancellationToken ct)
     {
-        string baseUrl = (cfg.base_url ?? "").TrimEnd('/');
+        string baseUrl = (cfg.BaseUrl ?? "").TrimEnd('/');
         string endpoint = $"{baseUrl}/chat/completions";
 
         var requestObj = new ChatRequest
         {
-            model = cfg.model ?? "",
-            messages = new[]
+            Model = cfg.Model ?? "",
+            Messages = new[]
             {
-                new ChatMessage { role = "system", content = prompt ?? "" },
-                new ChatMessage { role = "user", content = userText }
+                new ChatMessage { Role = "system", Content = prompt ?? "" },
+                new ChatMessage { Role = "user", Content = userText }
             }
         };
 
@@ -1646,9 +1674,9 @@ public static class App
         { Content = new StringContent(json, Encoding.UTF8, "application/json") };
 
         // Auth & custom headers
-        bool hasBearer = !string.Equals(cfg.api_key, "EMPTY", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(cfg.api_key);
-        if (hasBearer) httpReq.Headers.Add("Authorization", $"Bearer {cfg.api_key}");
-        var extra = ParseCustomHeaders(cfg.llm_custom_headers);
+        bool hasBearer = !string.Equals(cfg.ApiKey, "EMPTY", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(cfg.ApiKey);
+        if (hasBearer) httpReq.Headers.Add("Authorization", $"Bearer {cfg.ApiKey}");
+        var extra = ParseCustomHeaders(cfg.LlmCustomHeaders);
         foreach (var kv in extra) { try { httpReq.Headers.TryAddWithoutValidation(kv.Key, kv.Value); } catch { } }
 
         try
@@ -1667,7 +1695,7 @@ public static class App
             try
             {
                 var chatResp = JsonSerializer.Deserialize<ChatResponse>(body, JsonOpts);
-                string? content = chatResp?.choices?.Length > 0 ? chatResp!.choices[0].message?.content : null;
+                string? content = chatResp?.Choices?.Length > 0 ? chatResp!.Choices[0].Message?.Content : null;
                 return string.IsNullOrWhiteSpace(content) ? "(no response)" : content!.Trim();
             }
             catch (Exception ex) { Logger.Error(ex, "Parse LLM JSON failed"); LogRequestDetailsForError(endpoint, cfg, prompt, userText, extra, "parse-json"); return "⚠️ Failed to parse JSON response"; }
@@ -1683,9 +1711,9 @@ public static class App
 
     private static void LogRequestDetailsForError(string url, AppConfig cfg, string sysPrompt, string userPrompt, Dictionary<string, string> extraHeaders, string note)
     {
-        string token10 = (cfg.api_key ?? "").Length > 10 ? cfg.api_key.Substring(0, 10) : cfg.api_key ?? "";
+        string token10 = (cfg.ApiKey ?? "").Length > 10 ? cfg.ApiKey.Substring(0, 10) : cfg.ApiKey ?? "";
         var headerDump = string.Join(", ", extraHeaders.Select(kv => kv.Key + "=" + kv.Value));
-        Logger.Warn($"LLM-REQ-ERROR [{note}] url={url} model={cfg.model} token10='{token10}' headers=[{headerDump}] sys='{Trunc(sysPrompt, 120)}' user='{Trunc(userPrompt, 120)}'");
+        Logger.Warn($"LLM-REQ-ERROR [{note}] url={url} model={cfg.Model} token10='{token10}' headers=[{headerDump}] sys='{Trunc(sysPrompt, 120)}' user='{Trunc(userPrompt, 120)}'");
     }
 
     private static string Trunc(string s, int n)
@@ -1895,7 +1923,7 @@ public static class App
         catch (OperationCanceledException) when (outerCt.IsCancellationRequested) { throw; }
         catch (Exception ex) { Logger.Warn("Win32 stage exception: " + ex.Message); }
 
-        if (cfg.allow_clipboard_probe)
+        if (cfg.AllowClipboardProbe)
         {
             try
             {
@@ -2066,10 +2094,10 @@ public static class App
 
     private static async Task<GhRelease?> GetLatestReleaseAsync(AppConfig cfg, HttpClient http)
     {
-        if (string.IsNullOrWhiteSpace(cfg.update_repo_owner) || string.IsNullOrWhiteSpace(cfg.update_repo_name))
+        if (string.IsNullOrWhiteSpace(cfg.UpdateRepoOwner) || string.IsNullOrWhiteSpace(cfg.UpdateRepoName))
             return null;
 
-        var url = $"https://api.github.com/repos/{cfg.update_repo_owner.Trim()}/{cfg.update_repo_name.Trim()}/releases/latest";
+        var url = $"https://api.github.com/repos/{cfg.UpdateRepoOwner.Trim()}/{cfg.UpdateRepoName.Trim()}/releases/latest";
         using var req = new HttpRequestMessage(HttpMethod.Get, url);
         req.Headers.TryAddWithoutValidation("User-Agent", "ChatMouse/1.0 (+https://github.com)");
         req.Headers.TryAddWithoutValidation("Accept", "application/vnd.github+json");
@@ -2104,15 +2132,15 @@ public static class App
         bool newer = IsNewer(latest.Tag, current);
         if (!newer) return;
 
-        if (!string.IsNullOrWhiteSpace(cfg.last_notified_version) &&
-            string.Equals(NormalizeVersionTag(cfg.last_notified_version!), NormalizeVersionTag(latest.Tag), StringComparison.OrdinalIgnoreCase))
+        if (!string.IsNullOrWhiteSpace(cfg.LastNotifiedVersion) &&
+            string.Equals(NormalizeVersionTag(cfg.LastNotifiedVersion!), NormalizeVersionTag(latest.Tag), StringComparison.OrdinalIgnoreCase))
         {
             return;
         }
 
         ShowReleaseNotesDialog(latest, isManual: false);
 
-        cfg.last_notified_version = latest.Tag;
+        cfg.LastNotifiedVersion = latest.Tag;
         SaveConfig(cfg);
     }
 
@@ -2133,7 +2161,7 @@ public static class App
             if (newer)
             {
                 ShowReleaseNotesDialog(latest, isManual: true);
-                cfg.last_notified_version = latest.Tag;
+                cfg.LastNotifiedVersion = latest.Tag;
                 SaveConfig(cfg);
             }
             else
@@ -2287,168 +2315,167 @@ public class ConfigForm : Form
 
     private void BuildGeneralTab()
     {
-        // Use Panel with AutoScroll for better control
-        var scrollPanel = new Panel
+        var scrollPanel = new Panel { Dock = DockStyle.Fill, AutoScroll = true, Padding = new Padding(12) };
+        var flowLayout = new FlowLayoutPanel
         {
-            Dock = DockStyle.Fill,
-            AutoScroll = true
+            Dock = DockStyle.Top,
+            FlowDirection = FlowDirection.TopDown,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            WrapContents = false,
+            Width = scrollPanel.ClientSize.Width - 25
         };
 
-        // Container panel for groups
-        var containerPanel = new Panel
-        {
-            Location = new Point(8, 8),
-            Width = 850,
-            Height = 500
-        };
-
-        // DPI scale for label column widths
-        float scale = 1f; try { scale = DeviceDpi / 96f; } catch { }
-
-        // Hotkey Settings Group
+        // Hotkey Group
         var grpHotkey = new GroupBox
         {
             Text = "Hotkey Configuration",
-            Location = new Point(0, 0),
-            Width = 850,
-            Height = 100,
-            Padding = new Padding(12),
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Width = flowLayout.Width - 10,
+            Padding = new Padding(10),
+            Margin = new Padding(0, 0, 0, 10),
             Font = new Font("Segoe UI", 9.5f)
         };
 
-        var lblMainHotkey = new Label
+        var tblHotkey = new TableLayoutPanel
         {
-            Text = "Global Hotkey:",
-            Location = new Point(15, 30),
-            AutoSize = true
-        };
-
-        tbMainHotkey.Location = new Point(150, 27);
-        tbMainHotkey.Width = 300;
-
-        var lblHotkeyHelp = new Label
-        {
-            Text = "Example: Ctrl+Shift+Space",
-            Location = new Point(150, 55),
+            Dock = DockStyle.Fill,
             AutoSize = true,
-            ForeColor = Color.Gray,
-            Font = new Font("Segoe UI", 8.5f)
+            ColumnCount = 2,
+            RowCount = 2
         };
+        tblHotkey.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 130));
+        tblHotkey.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
-        grpHotkey.Controls.Add(lblMainHotkey);
-        grpHotkey.Controls.Add(tbMainHotkey);
-        grpHotkey.Controls.Add(lblHotkeyHelp);
+        tblHotkey.Controls.Add(new Label { Text = "Global Hotkey:", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(3, 6, 3, 3) }, 0, 0);
+        tbMainHotkey.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+        tbMainHotkey.Margin = new Padding(3);
+        tblHotkey.Controls.Add(tbMainHotkey, 1, 0);
 
-        // Tooltip Settings Group
+        var lblHelp = new Label { Text = "Example: Ctrl+Shift+Space", AutoSize = true, ForeColor = Color.Gray, Font = new Font("Segoe UI", 8.5f), Margin = new Padding(3) };
+        tblHotkey.SetColumnSpan(lblHelp, 2);
+        tblHotkey.Controls.Add(lblHelp, 0, 1);
+
+        grpHotkey.Controls.Add(tblHotkey);
+
+        // Tooltip Group
         var grpTooltip = new GroupBox
         {
             Text = "Tooltip Display Settings",
-            Location = new Point(0, 110),
-            Width = 850,
-            Height = 120,
-            Padding = new Padding(12),
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Width = flowLayout.Width - 10,
+            Padding = new Padding(10),
+            Margin = new Padding(0, 0, 0, 10),
             Font = new Font("Segoe UI", 9.5f)
         };
 
-        var lblStay = new Label
+        var tblTooltip = new TableLayoutPanel
         {
-            Text = "Normal Display:",
-            Location = new Point(15, 30),
-            AutoSize = true
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            ColumnCount = 3,
+            RowCount = 2
         };
+        tblTooltip.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 130));
+        tblTooltip.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        tblTooltip.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
 
-        nudTooltipStay.Location = new Point(150, 27);
+        tblTooltip.Controls.Add(new Label { Text = "Normal Display:", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(3, 6, 3, 3) }, 0, 0);
+        nudTooltipStay.Margin = new Padding(3);
+        tblTooltip.Controls.Add(nudTooltipStay, 1, 0);
+        tblTooltip.Controls.Add(new Label { Text = "ms", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(3, 6, 3, 3) }, 2, 0);
 
-        var lblStayMs = new Label
-        {
-            Text = "ms",
-            Location = new Point(255, 30),
-            AutoSize = true
-        };
+        tblTooltip.Controls.Add(new Label { Text = "Error Display:", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(3, 6, 3, 3) }, 0, 1);
+        nudTooltipError.Margin = new Padding(3);
+        tblTooltip.Controls.Add(nudTooltipError, 1, 1);
+        tblTooltip.Controls.Add(new Label { Text = "ms", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(3, 6, 3, 3) }, 2, 1);
 
-        var lblError = new Label
-        {
-            Text = "Error Display:",
-            Location = new Point(15, 60),
-            AutoSize = true
-        };
+        grpTooltip.Controls.Add(tblTooltip);
 
-        nudTooltipError.Location = new Point(150, 57);
-
-        var lblErrorMs = new Label
-        {
-            Text = "ms",
-            Location = new Point(255, 60),
-            AutoSize = true
-        };
-
-        grpTooltip.Controls.Add(lblStay);
-        grpTooltip.Controls.Add(nudTooltipStay);
-        grpTooltip.Controls.Add(lblStayMs);
-        grpTooltip.Controls.Add(lblError);
-        grpTooltip.Controls.Add(nudTooltipError);
-        grpTooltip.Controls.Add(lblErrorMs);
-
-        // Behavior Settings Group
+        // Behavior Group
         var grpBehavior = new GroupBox
         {
             Text = "Application Behavior",
-            Location = new Point(0, 240),
-            Width = 850,
-            Height = 100,
-            Padding = new Padding(12),
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Width = flowLayout.Width - 10,
+            Padding = new Padding(10),
+            Margin = new Padding(0, 0, 0, 10),
             Font = new Font("Segoe UI", 9.5f)
         };
 
-        cbAllowClip.Location = new Point(15, 30);
-        cbTrayMode.Location = new Point(15, 60);
+        var flowBehavior = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.TopDown,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink
+        };
 
-        grpBehavior.Controls.Add(cbAllowClip);
-        grpBehavior.Controls.Add(cbTrayMode);
+        cbAllowClip.AutoSize = true;
+        cbAllowClip.Margin = new Padding(3);
+        cbTrayMode.AutoSize = true;
+        cbTrayMode.Margin = new Padding(3);
 
-        // Add all groups to container
-        containerPanel.Controls.Add(grpHotkey);
-        containerPanel.Controls.Add(grpTooltip);
-        containerPanel.Controls.Add(grpBehavior);
+        flowBehavior.Controls.Add(cbAllowClip);
+        flowBehavior.Controls.Add(cbTrayMode);
+        grpBehavior.Controls.Add(flowBehavior);
 
-        scrollPanel.Controls.Add(containerPanel);
+        flowLayout.Controls.Add(grpHotkey);
+        flowLayout.Controls.Add(grpTooltip);
+        flowLayout.Controls.Add(grpBehavior);
+
+        scrollPanel.Controls.Add(flowLayout);
         tabGeneral.Controls.Add(scrollPanel);
     }
 
     private void BuildPromptsTab()
     {
-        // Simple scrollable panel
-        var scrollPanel = new Panel
+        var scrollPanel = new Panel { Dock = DockStyle.Fill, AutoScroll = true, Padding = new Padding(12) };
+        var flowLayout = new FlowLayoutPanel
         {
-            Dock = DockStyle.Fill,
-            AutoScroll = true
+            Dock = DockStyle.Top,
+            FlowDirection = FlowDirection.TopDown,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            WrapContents = false,
+            Width = scrollPanel.ClientSize.Width - 25
         };
 
-        var prompts = (_cfg.prompts ?? Array.Empty<string>()).ToArray();
+        var prompts = (_cfg.Prompts ?? Array.Empty<string>()).ToArray();
         if (prompts.Length < 9) Array.Resize(ref prompts, 9);
-        var hks = (_cfg.prompt_hotkeys ?? Array.Empty<string>()).ToArray();
+        var hks = (_cfg.PromptHotkeys ?? Array.Empty<string>()).ToArray();
         if (hks.Length < 9) Array.Resize(ref hks, 9);
-
-        int yPos = 10;
 
         for (int i = 0; i < 9; i++)
         {
-            // Create a panel for each prompt
-            var promptPanel = new Panel
+            var grpPrompt = new GroupBox
             {
-                Location = new Point(10, yPos),
-                Width = 850,
-                Height = 120,
-                BorderStyle = BorderStyle.FixedSingle
+                Text = $"Prompt {i + 1}",
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Width = flowLayout.Width - 10,
+                Padding = new Padding(10),
+                Margin = new Padding(0, 0, 0, 10),
+                Font = new Font("Segoe UI", 9f)
             };
 
-            var lblNum = new Label
+            var tblPrompt = new TableLayoutPanel
             {
-                Text = $"Prompt {i + 1}:",
-                Location = new Point(10, 10),
+                Dock = DockStyle.Fill,
                 AutoSize = true,
-                Font = new Font("Segoe UI", 9f, FontStyle.Bold)
+                ColumnCount = 2,
+                RowCount = 2
             };
+            tblPrompt.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 70));
+            tblPrompt.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 30));
+            tblPrompt.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            tblPrompt.RowStyles.Add(new RowStyle(SizeType.Absolute, 90));
+
+            tblPrompt.Controls.Add(new Label { Text = "Prompt Text:", AutoSize = true, Margin = new Padding(3) }, 0, 0);
+            tblPrompt.Controls.Add(new Label { Text = "Hotkey:", AutoSize = true, Margin = new Padding(3) }, 1, 0);
 
             var tbP = new TextBox
             {
@@ -2456,41 +2483,28 @@ public class ConfigForm : Form
                 ScrollBars = ScrollBars.Vertical,
                 AcceptsReturn = true,
                 Text = prompts[i] ?? "",
-                Location = new Point(10, 35),
-                Width = 600,
-                Height = 70,
-                Font = new Font("Consolas", 9f)
+                Dock = DockStyle.Fill,
+                Font = new Font("Consolas", 9f),
+                Margin = new Padding(3)
             };
-
-            var lblHotkey = new Label
-            {
-                Text = "Hotkey:",
-                Location = new Point(630, 35),
-                AutoSize = true,
-                Font = new Font("Segoe UI", 9f)
-            };
+            tbPrompts.Add(tbP);
+            tblPrompt.Controls.Add(tbP, 0, 1);
 
             var tbH = new TextBox
             {
                 Text = hks[i] ?? "",
-                Location = new Point(630, 60),
-                Width = 200,
-                Font = new Font("Segoe UI", 9f)
+                Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right,
+                Font = new Font("Segoe UI", 9f),
+                Margin = new Padding(3)
             };
-
-            tbPrompts.Add(tbP);
             tbPromptHotkeys.Add(tbH);
+            tblPrompt.Controls.Add(tbH, 1, 1);
 
-            promptPanel.Controls.Add(lblNum);
-            promptPanel.Controls.Add(tbP);
-            promptPanel.Controls.Add(lblHotkey);
-            promptPanel.Controls.Add(tbH);
-
-            scrollPanel.Controls.Add(promptPanel);
-
-            yPos += 130;
+            grpPrompt.Controls.Add(tblPrompt);
+            flowLayout.Controls.Add(grpPrompt);
         }
 
+        scrollPanel.Controls.Add(flowLayout);
         tabPrompts.Controls.Add(scrollPanel);
     }
 
@@ -2811,18 +2825,18 @@ public class ConfigForm : Form
     private void FillValuesFromConfig()
     {
         // General
-        tbMainHotkey.Text = _cfg.hotkey;
-        cbAllowClip.Checked = _cfg.allow_clipboard_probe;
-        cbTrayMode.Checked = _cfg.tray_mode;
-        nudTooltipStay.Value = Math.Max(1500, _cfg.tooltip_stay_ms);
-        nudTooltipError.Value = Math.Max(1500, _cfg.tooltip_error_ms);
+        tbMainHotkey.Text = _cfg.Hotkey;
+        cbAllowClip.Checked = _cfg.AllowClipboardProbe;
+        cbTrayMode.Checked = _cfg.TrayMode;
+        nudTooltipStay.Value = Math.Max(1500, _cfg.TooltipStayMs);
+        nudTooltipError.Value = Math.Max(1500, _cfg.TooltipErrorMs);
 
         // LLM
-        tbBaseUrl.Text = _cfg.base_url;
-        tbApiKey.Text = _cfg.api_key;
-        tbModel.Text = _cfg.model;
+        tbBaseUrl.Text = _cfg.BaseUrl;
+        tbApiKey.Text = _cfg.ApiKey;
+        tbModel.Text = _cfg.Model;
         // JSON 형식으로 표시 (더 읽기 쉬움)
-        var headers = _cfg.llm_custom_headers ?? Array.Empty<string>();
+        var headers = _cfg.LlmCustomHeaders ?? Array.Empty<string>();
         if (headers.Length > 0)
         {
             try
@@ -2868,15 +2882,15 @@ public class ConfigForm : Form
         }
 
         // Network
-        tbProxy.Text = _cfg.http_proxy ?? "";
-        nudTimeout.Value = _cfg.request_timeout_seconds > 0 ? _cfg.request_timeout_seconds : 10;
-        cbSslOff.Checked = _cfg.disable_ssl_verify;
+        tbProxy.Text = _cfg.HttpProxy ?? "";
+        nudTimeout.Value = _cfg.RequestTimeoutSeconds > 0 ? _cfg.RequestTimeoutSeconds : 10;
+        cbSslOff.Checked = _cfg.DisableSslVerify;
 
         // Updates
-        cbUpdate.Checked = _cfg.update_check_enabled;
+        cbUpdate.Checked = _cfg.UpdateCheckEnabled;
         tbCurrentVersion.Text = App.GetCurrentVersionString();
-        tbRepoOwner.Text = _cfg.update_repo_owner ?? "";
-        tbRepoName.Text = _cfg.update_repo_name ?? "";
+        tbRepoOwner.Text = _cfg.UpdateRepoOwner ?? "";
+        tbRepoName.Text = _cfg.UpdateRepoName ?? "";
     }
 
     public AppConfig GetConfig()
@@ -2931,33 +2945,33 @@ public class ConfigForm : Form
         return new AppConfig
         {
             // General
-            hotkey = tbMainHotkey.Text.Trim(),
-            allow_clipboard_probe = cbAllowClip.Checked,
-            tray_mode = cbTrayMode.Checked,
-            tooltip_stay_ms = (int)nudTooltipStay.Value,
-            tooltip_error_ms = (int)nudTooltipError.Value,
+            Hotkey = tbMainHotkey.Text.Trim(),
+            AllowClipboardProbe = cbAllowClip.Checked,
+            TrayMode = cbTrayMode.Checked,
+            TooltipStayMs = (int)nudTooltipStay.Value,
+            TooltipErrorMs = (int)nudTooltipError.Value,
 
             // Prompts
-            prompt = prompts[0] ?? "",
-            prompts = prompts,
-            prompt_hotkeys = hotkeys,
+            Prompt = prompts[0] ?? "",
+            Prompts = prompts,
+            PromptHotkeys = hotkeys,
 
             // LLM
-            base_url = tbBaseUrl.Text.Trim(),
-            api_key = tbApiKey.Text.Trim(),
-            model = tbModel.Text.Trim(),
-            llm_custom_headers = headers,
+            BaseUrl = tbBaseUrl.Text.Trim(),
+            ApiKey = tbApiKey.Text.Trim(),
+            Model = tbModel.Text.Trim(),
+            LlmCustomHeaders = headers,
 
             // Network
-            http_proxy = string.IsNullOrWhiteSpace(tbProxy.Text) ? null : tbProxy.Text.Trim(),
-            disable_ssl_verify = cbSslOff.Checked,
-            request_timeout_seconds = (int)nudTimeout.Value,
+            HttpProxy = string.IsNullOrWhiteSpace(tbProxy.Text) ? null : tbProxy.Text.Trim(),
+            DisableSslVerify = cbSslOff.Checked,
+            RequestTimeoutSeconds = (int)nudTimeout.Value,
 
             // Updates
-            update_check_enabled = cbUpdate.Checked,
-            update_repo_owner = _cfg.update_repo_owner, // read-only here
-            update_repo_name = _cfg.update_repo_name,
-            last_notified_version = App.GetCurrentConfig().last_notified_version
+            UpdateCheckEnabled = cbUpdate.Checked,
+            UpdateRepoOwner = _cfg.UpdateRepoOwner, // read-only here
+            UpdateRepoName = _cfg.UpdateRepoName,
+            LastNotifiedVersion = App.GetCurrentConfig().LastNotifiedVersion
         };
     }
 }

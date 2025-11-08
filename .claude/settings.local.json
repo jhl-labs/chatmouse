@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(dotnet build:*)"
+      "Bash(dotnet build:*)",
+      "Bash(start bin/Release/net8.0-windows/win-x64/publish/ChatMouse.exe)"
     ],
     "deny": [],
     "ask": []
