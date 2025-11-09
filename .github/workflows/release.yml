@@ -30,9 +30,6 @@ jobs:
     - name: Build
       run: dotnet build --configuration Release --no-restore
 
-    - name: Publish
-      run: dotnet publish --configuration Release --output ./publish --no-build
-
     - name: Get version
       id: get_version
       shell: pwsh
@@ -42,8 +39,51 @@ jobs:
         } else {
           $version = "${{ github.event.inputs.version }}"
         }
+        # Remove 'v' prefix if present for assembly version
+        $cleanVersion = $version -replace '^v', ''
         echo "VERSION=$version" >> $env:GITHUB_OUTPUT
-        echo "Version: $version"
+        echo "CLEAN_VERSION=$cleanVersion" >> $env:GITHUB_OUTPUT
+        echo "Version: $version (Clean: $cleanVersion)"
+
+    - name: Publish
+      run: |
+        dotnet publish ChatMouse.csproj --configuration Release -r win-x64 `
+          -p:PublishSingleFile=true `
+          -p:SelfContained=true `
+          -p:IncludeNativeLibrariesForSelfContained=true `
+          -p:IncludeAllContentForSelfExtract=true `
+          -p:EnableCompressionInSingleFile=true `
+          -p:PublishTrimmed=false `
+          -p:PublishReadyToRun=true `
+          -p:Version=${{ steps.get_version.outputs.CLEAN_VERSION }} `
+          -p:InformationalVersion=${{ steps.get_version.outputs.VERSION }} `
+          --no-build `
+          -o ./publish
+
+    - name: Calculate SHA256 checksum
+      shell: pwsh
+      run: |
+        $hash = Get-FileHash -Path ./publish/ChatMouse.exe -Algorithm SHA256
+        $hash.Hash | Out-File -FilePath ./publish/ChatMouse.exe.sha256 -Encoding ASCII
+        Write-Host "SHA256: $($hash.Hash)"
+
+    - name: Create build info
+      shell: pwsh
+      run: |
+        $version = "${{ steps.get_version.outputs.VERSION }}"
+        $buildInfo = @"
+        Build Information
+        ==================
+        Build Date: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+        Configuration: Release
+        Runtime: win-x64
+        Version: $version
+        Platform: Windows x64
+
+        Files:
+        ChatMouse.exe
+        "@
+        $buildInfo | Out-File -FilePath ./publish/BUILD_INFO.txt -Encoding UTF8
 
     - name: Create ZIP archive
       shell: pwsh

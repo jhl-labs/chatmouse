@@ -1872,7 +1872,7 @@ public static class App
         var cfg = LoadConfig();
 
         // Environment overrides for update repo owner/name
-        string? envOwner = "jong-hun-lee";
+        string? envOwner = "jhl-labs";
         string? envRepo = "chatmouse";
         if (!string.IsNullOrWhiteSpace(envOwner)) cfg.UpdateRepoOwner = envOwner.Trim();
         if (!string.IsNullOrWhiteSpace(envRepo)) cfg.UpdateRepoName = envRepo.Trim();
