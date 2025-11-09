@@ -1,15 +1,4 @@
 // Program.cs - ChatMouse
-// - Single-instance (WM_COPYDATA IPC)
-// - Tooltip with fade, selectable Text mode, close button
-// - CRLF normalization for consistent wrapping
-// - Config in %USERPROFILE%\.chatmouse\config.json
-// - Multiple prompts (1..9) with INDIVIDUAL GLOBAL HOTKEYS per prompt
-// - Settings: Tabbed UI (General / Prompts & Hotkeys / LLM / Network / Updates)
-// - Hotkey: robust parsing, unregister/re-register all on settings change, one toast summary
-// - Tooltip lifetime configurable; error auto-hide but NOT during active LLM request
-// - LLM call: detailed logging of request when error (URL, token first 10 chars, model, headers, prompts)
-// - Update checker (GitHub) with env override & .env support
-
 #region Using
 
 using System.Diagnostics;
